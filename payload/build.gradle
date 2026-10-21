@@ -1,0 +1,90 @@
+plugins {
+    id 'java'
+}
+
+// The payload runs inside the target app, so it is compiled against android.jar and
+// turned into a dex with the SDK's d8. It is deliberately a plain java project:
+// the CLI jar must not pull in the Android build tools.
+
+def sdkDir = {
+    def props = rootProject.file('local.properties')
+    if (props.exists()) {
+        def line = props.withReader { r -> r.readLines().find { it.startsWith('sdk.dir=') } }
+        if (line != null) {
+            return line.substring('sdk.dir='.length()).trim()
+        }
+    }
+    return System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+}()
+
+def androidJar = {
+    if (sdkDir == null) return null
+    def platforms = new File(sdkDir, 'platforms')
+    if (!platforms.isDirectory()) return null
+    def dirs = platforms.listFiles().findAll { it.isDirectory() }.sort { it.name }
+    return dirs.isEmpty() ? null : new File(dirs.last(), 'android.jar')
+}()
+
+def d8Tool = {
+    if (sdkDir == null) return null
+    def buildTools = new File(sdkDir, 'build-tools')
+    if (!buildTools.isDirectory()) return null
+    def dirs = buildTools.listFiles().findAll { it.isDirectory() }.sort { it.name }
+    if (dirs.isEmpty()) return null
+    def bin = new File(dirs.last(), 'd8')
+    return bin.isFile() ? bin : null
+}()
+
+dependencies {
+    if (androidJar != null) {
+        compileOnly files(androidJar)
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    // android.jar has no java.* stubs for the platform; keep javac quiet about it.
+    options.compilerArgs << '-Xlint:-options'
+}
+
+tasks.register('buildDex') {
+    group = 'build'
+    description = 'Compiles the payload into payload.dex with the SDK d8 tool.'
+    dependsOn tasks.named('jar')
+
+    def jarProvider = tasks.named('jar').flatMap { it.archiveFile }
+    def outDir = layout.buildDirectory.dir('dex')
+    inputs.file(jarProvider)
+    outputs.dir(outDir)
+
+    doLast {
+        if (androidJar == null) {
+            throw new GradleException('Android SDK not found. Set sdk.dir in local.properties or ANDROID_HOME.')
+        }
+        if (d8Tool == null) {
+            throw new GradleException('d8 not found under ' + new File(sdkDir, 'build-tools'))
+        }
+        def out = outDir.get().asFile
+        out.deleteDir()
+        out.mkdirs()
+
+        def proc = new ProcessBuilder(
+                d8Tool.absolutePath, '--output', out.absolutePath, jarProvider.get().asFile.absolutePath)
+                .redirectErrorStream(true)
+                .start()
+        def output = proc.inputStream.text
+        if (proc.waitFor() != 0) {
+            throw new GradleException("d8 failed (exit ${proc.exitValue()}):\n${output}")
+        }
+
+        def produced = out.listFiles().findAll { it.name.endsWith('.dex') }
+        if (produced.isEmpty()) {
+            throw new GradleException("d8 produced no dex:\n${output}")
+        }
+        def target = new File(out, 'payload.dex')
+        if (produced.size() == 1 && produced[0] != target) {
+            produced[0].renameTo(target)
+        }
+        logger.lifecycle("payload dex -> ${target} (${target.length()} bytes)")
+    }
+}

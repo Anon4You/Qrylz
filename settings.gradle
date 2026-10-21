@@ -1,0 +1,21 @@
+pluginManagement {
+    repositories {
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+dependencyResolutionManagement {
+    repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+    repositories {
+        google()
+        mavenCentral()
+        // REAndroid publishes ARSCLib and APKEditor through JitPack.
+        maven { url = uri("https://jitpack.io") }
+    }
+}
+
+rootProject.name = "Qrylz"
+
+include(":payload")

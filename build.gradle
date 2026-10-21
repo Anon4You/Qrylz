@@ -1,0 +1,80 @@
+plugins {
+    id 'application'
+
+    // The upstream plugin id `com.github.johnrengelman.shadow` stopped at 8.1.1 and does
+    // not run on Gradle 9 (it uses task APIs that were removed). `com.gradleup.shadow`
+    // is the maintained drop-in fork and exposes the exact same `shadowJar { }` DSL.
+    // On Gradle 8 switch back to: id 'com.github.johnrengelman.shadow' version '8.1.1'
+    id 'com.gradleup.shadow' version '9.0.0'
+}
+
+group = 'alienkrishn.qrylz'
+version = '1.0.0'
+
+// Compiled with whatever JDK runs Gradle, but the bytecode stays on Java 17 so the jar
+// runs on older JVMs.
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+application {
+    mainClass = 'alienkrishn.qrylz.Qrylz'
+}
+
+dependencies {
+    implementation 'info.picocli:picocli:4.7.5'
+    // ARSCLib carries the whole APK engine: ApkModule (read/write), ApkBundle (split
+    // merging) and the binary AndroidManifest reader/writer. The separate APKEditor
+    // artifact is only a command line wrapper around this and drags in a jcommand
+    // dependency that the library itself does not need.
+    implementation 'com.github.REAndroid:ARSCLib:V1.4.0'
+    // DEX reading/writing/patching.
+    implementation 'com.android.tools.smali:smali-dexlib2:3.0.10'
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+// payload.dex is produced by :payload:buildDex (SDK d8) and packaged as a resource
+// so the CLI can find it on its own classpath.
+tasks.named('processResources') {
+    dependsOn ':payload:buildDex'
+    from(layout.projectDirectory.dir('payload/build/dex')) {
+        include 'payload.dex'
+    }
+}
+
+tasks.named('jar') {
+    manifest {
+        attributes 'Main-Class': 'alienkrishn.qrylz.Qrylz'
+    }
+}
+
+shadowJar {
+    archiveBaseName = 'qrylz'
+    archiveClassifier = ''
+    archiveVersion = ''
+
+    // DEX tooling and the CLI both look up implementations through the service loader.
+    mergeServiceFiles()
+
+    // Shrink the fat jar. ARSCLib reaches some of its framework/resource helpers
+    // reflectively, so its whole tree has to survive the shrinker.
+    minimize {
+        exclude(dependency('com.github.REAndroid:ARSCLib:.*'))
+    }
+
+    manifest {
+        attributes 'Main-Class': 'alienkrishn.qrylz.Qrylz'
+    }
+}
+
+// Convenience: ./gradlew run --args="-i in.apk -o out.apk"
+tasks.named('run') {
+    if (project.hasProperty('runArgs')) {
+        args project.property('runArgs').toString().split('\\s+')
+    }
+}
