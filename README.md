@@ -56,7 +56,32 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -V, --version        Print version information and exit.
 ```
 
-## Layout
+## Status
+
+Verified end to end on a real split APK set (Android 13, arm64-v8a):
+
+| Step | Result |
+| --- | --- |
+| merge `.apks` | 4 modules merged into one APK |
+| read the certificate | taken from the **v2/v3 signature block** - modern APKs carry no `META-INF/CERT.RSA` |
+| origin archive | `assets/qrylz_origin.zip`, 29 KB |
+| patch the payload | the 744 character Base64 certificate replaces `PLACEHOLDER_SIG` |
+| merge + hook | `IbisPaintApplication.attachBaseContext` gets the payload call prepended |
+| install | installs and launches, the payload runs |
+
+Two things are still open, both reported by the payload at runtime:
+
+```
+W Qrylz: Native hook qrylz_hook not loaded
+W Qrylz: java.lang.UnsatisfiedLinkError: dlopen failed: library "libqrylz_hook.so" not found
+W Qrylz: java.lang.NoSuchFieldException: No field mPackageManager in class Landroid/app/ActivityThread;
+```
+
+The first one is the native hook that is not written yet. The second one is the
+consequence: `ActivityThread.mPackageManager` is a hidden API, so the proxy cannot be
+installed on Android 9 and newer until the native hook lifts that restriction.
+
+
 
 | Path | Contents |
 | --- | --- |
