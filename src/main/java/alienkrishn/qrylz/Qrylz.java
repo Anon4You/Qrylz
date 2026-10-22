@@ -7,6 +7,8 @@ import com.reandroid.apk.ApkBundle;
 import com.reandroid.apk.ApkModule;
 import com.reandroid.archive.ByteInputSource;
 import com.reandroid.archive.FileInputSource;
+import com.reandroid.arsc.chunk.xml.ResXmlAttribute;
+import com.reandroid.arsc.chunk.xml.ResXmlElement;
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -17,7 +19,9 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
 import java.util.Enumeration;
+import java.util.LinkedHashMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
@@ -48,6 +52,10 @@ public final class Qrylz implements Callable<Integer> {
 
     /** Application class used when the manifest does not declare one. */
     private static final String FALLBACK_APPLICATION = "alienkrishn.qrylz.payload.QrylzApplication";
+
+    /** Factory that installs the payload before the application class is loaded. */
+    private static final String APP_COMPONENT_FACTORY =
+            "alienkrishn.qrylz.payload.QrylzAppComponentFactory";
 
     /** Native hook that is loaded from the patched application class. */
     private static final String NATIVE_HOOK = "qrylz_hook";
@@ -84,10 +92,18 @@ public final class Qrylz implements Callable<Integer> {
         log("origin archive: " + SignatureExtractor.ORIGIN_ARCHIVE
                 + " (" + originArchive.length + " bytes, " + signature.getMetaInf().size() + " entries)");
 
-        DexFile payloadDex = DexInjector.loadPatchedPayload(readPayload(), signature.getBase64());
-        log("payload: signature placeholder patched");
-
         try (ApkModule module = ApkModule.loadApkFile(apk)) {
+            // The app component factory is the earliest hook point: the system asks it
+            // for the application instance before the application class is loaded. The
+            // factory that is already in the manifest is kept and still used.
+            String originalFactory = swapAppComponentFactory(module);
+
+            Map<String, String> placeholders = new LinkedHashMap<>();
+            placeholders.put(DexInjector.PLACEHOLDER, signature.getBase64());
+            placeholders.put(DexInjector.FACTORY_PLACEHOLDER, originalFactory);
+            DexFile payloadDex = DexInjector.loadPatchedPayload(readPayload(), placeholders);
+            log("payload: placeholders patched");
+
             String applicationClass = module.getAndroidManifest().getApplicationClassName();
             if (applicationClass == null || applicationClass.isEmpty()) {
                 applicationClass = FALLBACK_APPLICATION;
@@ -160,6 +176,30 @@ public final class Qrylz implements Callable<Integer> {
         log("written: " + output.getAbsolutePath());
         log("done - sign the output APK with your own key before installing it");
         return 0;
+    }
+
+    /**
+     * Points {@code android:appComponentFactory} at the payload factory so the proxy is
+     * installed before the application class - and with it any native library - is
+     * loaded.
+     *
+     * @param module the apk being patched
+     * @return the factory that was in the manifest before, empty when there was none
+     */
+    private String swapAppComponentFactory(ApkModule module) {
+        ResXmlElement application = module.getAndroidManifest().getOrCreateApplicationElement();
+        for (java.util.Iterator<ResXmlAttribute> it = application.getAttributes(); it.hasNext();) {
+            ResXmlAttribute attribute = it.next();
+            if (!"appComponentFactory".equals(attribute.getName())) {
+                continue;
+            }
+            String original = attribute.getValueString();
+            attribute.setValueAsString(APP_COMPONENT_FACTORY);
+            log("manifest: appComponentFactory " + original + " -> " + APP_COMPONENT_FACTORY);
+            return original == null ? "" : original;
+        }
+        log("manifest: no appComponentFactory, the payload is started from attachBaseContext");
+        return "";
     }
 
     /**

@@ -45,6 +45,12 @@ public final class QrylzPayload {
      */
     public static final String SIGNATURE_BASE64 = "PLACEHOLDER_SIG";
 
+    /**
+     * Placeholder for the app component factory that was in the manifest before the
+     * patch. It is still used to instantiate the components of the application.
+     */
+    public static final String ORIGINAL_FACTORY = "PLACEHOLDER_FACTORY";
+
     private static volatile boolean installed;
 
     /** Package name of the host application, the only one whose signature is rewritten. */
@@ -60,11 +66,35 @@ public final class QrylzPayload {
      * @param context any context of the host application
      */
     public static void install(Context context) {
+        if (context != null && hostPackage == null) {
+            hostPackage = context.getPackageName();
+        }
+        installProxy();
+    }
+
+    /**
+     * Installs the proxy without a context, used from the app component factory where
+     * the package name is all that is available.
+     *
+     * @param packageName the package name of the host application, may be {@code null}
+     */
+    public static void installForPackage(String packageName) {
+        if (packageName != null && !packageName.isEmpty() && hostPackage == null) {
+            hostPackage = packageName;
+        }
+        installProxy();
+    }
+
+    private static void installProxy() {
         if (installed) {
             return;
         }
+        if (hostPackage == null) {
+            // Without the package name the proxy cannot tell its own package apart from
+            // the others, so wait until the name is known.
+            return;
+        }
         installed = true;
-        hostPackage = context == null ? null : context.getPackageName();
         loadNativeHook();
         try {
             Signature original = originalSignature();
@@ -74,7 +104,6 @@ public final class QrylzPayload {
             }
             if (installProxy(original)) {
                 Log.i(TAG, "Signature proxy installed");
-                verify(context, original);
             } else {
                 Log.w(TAG, "Signature proxy not installed");
             }

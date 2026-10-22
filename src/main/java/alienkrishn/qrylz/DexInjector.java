@@ -36,6 +36,7 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Map;
 import java.util.List;
 import java.util.Set;
 
@@ -55,6 +56,9 @@ public final class DexInjector {
     /** Placeholder in the payload that carries the original signature. */
     public static final String PLACEHOLDER = "PLACEHOLDER_SIG";
 
+    /** Placeholder in the payload that carries the original app component factory. */
+    public static final String FACTORY_PLACEHOLDER = "PLACEHOLDER_FACTORY";
+
     /** Payload entry point that is called from the patched application class. */
     public static final String PAYLOAD_CLASS = "alienkrishn.qrylz.payload.QrylzPayload";
 
@@ -73,9 +77,22 @@ public final class DexInjector {
      */
     public static DexFile loadPatchedPayload(byte[] payloadBytes, String signatureBase64)
             throws IOException {
+        return loadPatchedPayload(payloadBytes, Collections.singletonMap(PLACEHOLDER, signatureBase64));
+    }
+
+    /**
+     * Loads {@code payload.dex} and replaces every placeholder with its value.
+     *
+     * @param payloadBytes raw payload dex
+     * @param values       placeholder to value
+     * @return the patched payload dex
+     * @throws IOException when the payload cannot be parsed
+     */
+    public static DexFile loadPatchedPayload(byte[] payloadBytes, Map<String, String> values)
+            throws IOException {
         DexBackedDexFile payload = DexBackedDexFile.fromInputStream(
                 Opcodes.getDefault(), new ByteArrayInputStream(payloadBytes));
-        return replacePlaceholder(payload, PLACEHOLDER, signatureBase64);
+        return replacePlaceholders(payload, values);
     }
 
     /**
@@ -90,15 +107,29 @@ public final class DexInjector {
      * @return the rewritten dex
      */
     public static DexFile replacePlaceholder(DexFile dex, String placeholder, String value) {
+        return replacePlaceholders(dex, Collections.singletonMap(placeholder, value));
+    }
+
+    /**
+     * Replaces every occurrence of the placeholders with their values.
+     * <p>
+     * Both places a string can hide are handled: the {@code const-string} instruction
+     * (dex format 21c) and the initial value of a static field.
+     *
+     * @param dex    dex to rewrite
+     * @param values placeholder to value
+     * @return the rewritten dex
+     */
+    public static DexFile replacePlaceholders(DexFile dex, Map<String, String> values) {
         List<ClassDef> classes = new ArrayList<>();
         for (ClassDef classDef : dex.getClasses()) {
             List<Field> fields = new ArrayList<>();
             for (Field field : classDef.getFields()) {
-                fields.add(replaceInField(field, placeholder, value));
+                fields.add(replaceInField(field, values));
             }
             List<Method> methods = new ArrayList<>();
             for (Method method : classDef.getMethods()) {
-                methods.add(replaceInMethod(method, placeholder, value));
+                methods.add(replaceInMethod(method, values));
             }
             classes.add(new ImmutableClassDef(
                     classDef.getType(),
@@ -243,23 +274,25 @@ public final class DexInjector {
 
     // ------------------------------------------------------------------ helpers
 
-    private static Field replaceInField(Field field, String placeholder, String value) {
+    private static Field replaceInField(Field field, Map<String, String> values) {
         EncodedValue initial = field.getInitialValue();
-        if (initial instanceof StringEncodedValue
-                && placeholder.equals(((StringEncodedValue) initial).getValue())) {
-            return new ImmutableField(
-                    field.getDefiningClass(),
-                    field.getName(),
-                    field.getType(),
-                    field.getAccessFlags(),
-                    new ImmutableStringEncodedValue(value),
-                    field.getAnnotations(),
-                    field.getHiddenApiRestrictions());
+        if (initial instanceof StringEncodedValue) {
+            String value = values.get(((StringEncodedValue) initial).getValue());
+            if (value != null) {
+                return new ImmutableField(
+                        field.getDefiningClass(),
+                        field.getName(),
+                        field.getType(),
+                        field.getAccessFlags(),
+                        new ImmutableStringEncodedValue(value),
+                        field.getAnnotations(),
+                        field.getHiddenApiRestrictions());
+            }
         }
         return field;
     }
 
-    private static Method replaceInMethod(Method method, String placeholder, String value) {
+    private static Method replaceInMethod(Method method, Map<String, String> values) {
         MethodImplementation implementation = method.getImplementation();
         if (implementation == null) {
             return method;
@@ -269,14 +302,16 @@ public final class DexInjector {
         for (Instruction instruction : implementation.getInstructions()) {
             if (instruction instanceof Instruction21c) {
                 Reference reference = ((Instruction21c) instruction).getReference();
-                if (reference instanceof StringReference
-                        && placeholder.equals(((StringReference) reference).getString())) {
-                    instructions.add(new BuilderInstruction21c(
-                            Opcode.CONST_STRING,
-                            ((Instruction21c) instruction).getRegisterA(),
-                            new ImmutableStringReference(value)));
-                    changed = true;
-                    continue;
+                if (reference instanceof StringReference) {
+                    String value = values.get(((StringReference) reference).getString());
+                    if (value != null) {
+                        instructions.add(new BuilderInstruction21c(
+                                Opcode.CONST_STRING,
+                                ((Instruction21c) instruction).getRegisterA(),
+                                new ImmutableStringReference(value)));
+                        changed = true;
+                        continue;
+                    }
                 }
             }
             instructions.add(instruction);
