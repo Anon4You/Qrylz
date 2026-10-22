@@ -23,11 +23,12 @@ jobs:
           java-version: '17'
 
       - name: Set up the Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install the SDK packages
         run: |
-          sdkmanager --install "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865" "cmake;4.1.2"
+          set -e
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-36" "build-tools;36.1.0" "ndk;29.0.14206865" "cmake;4.1.2"
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/29.0.14206865" >> "$GITHUB_ENV"
 
       - name: Point the build at the SDK
         run: echo "sdk.dir=$ANDROID_HOME" > local.properties
