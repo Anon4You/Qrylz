@@ -9,7 +9,10 @@ plugins {
 }
 
 group = 'alienkrishn.qrylz'
-version = '1.0.0'
+
+// The version of the tool. This is the only place it is written down, the command line
+// reads it from a resource that is generated from it.
+version = '1.0.2'
 
 // Compiled with whatever JDK runs Gradle, but the bytecode stays on Java 17 so the jar
 // runs on older JVMs.
@@ -86,7 +89,24 @@ tasks.register('buildNativeHook', Exec) {
 
 // payload.dex is produced by :payload:buildDex (SDK d8) and packaged as a resource
 // so the CLI can find it on its own classpath. The native hook goes in the same way.
+// The version ends up in the jar, so the command line always shows the version it was
+// built with.
+def versionResource = layout.buildDirectory.file('generated/qrylz-version.txt')
+tasks.register('generateVersionResource') {
+    def output = versionResource
+    def value = project.version.toString()
+    inputs.property('version', value)
+    outputs.file(output)
+    doLast {
+        def file = output.get().asFile
+        file.parentFile.mkdirs()
+        file.text = value
+    }
+}
+
 tasks.named('processResources') {
+    dependsOn 'generateVersionResource'
+    from(versionResource)
     dependsOn ':payload:buildDex'
     from(layout.projectDirectory.dir('payload/build/dex')) {
         include 'payload.dex'

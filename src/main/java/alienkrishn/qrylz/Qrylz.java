@@ -124,6 +124,24 @@ public final class Qrylz implements Callable<Integer> {
     }
 
     /**
+     * @return the version of the build
+     */
+    private static String readVersion() {
+        try (InputStream in = Qrylz.class.getClassLoader()
+                .getResourceAsStream("qrylz-version.txt")) {
+            if (in != null) {
+                String version = new String(in.readAllBytes(),
+                        java.nio.charset.StandardCharsets.UTF_8).trim();
+                if (!version.isEmpty()) {
+                    return version;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "0.0.0";
+    }
+
+    /**
      * @return the file the patched apk is written to when no output was given
      */
     private static File defaultOutput(File input) {
@@ -295,9 +313,12 @@ public final class Qrylz implements Callable<Integer> {
             " ██ █ █   █   █   █████ █████",
     };
 
+    /** The version of the build, read from the resource the build generates. */
+    private static final String VERSION = readVersion();
+
     /** What is printed on the right side of the logo. */
     private static final String[][] SIDEBAR = {
-            {Ansi.dim("1.0.0"), " ", Ansi.cyan("signature verification test harness")},
+            {Ansi.dim(VERSION), " ", Ansi.cyan("signature verification test harness")},
             {Ansi.yellow("Alienkrishn"), " ", Ansi.dim("[Anon4You]")},
             {Ansi.dim("github.com/Anon4You/Qrylz")},
     };
@@ -333,7 +354,7 @@ public final class Qrylz implements Callable<Integer> {
         @Override
         public String[] getVersion() {
             return new String[]{
-                    "qrylz 1.0.0",
+                    "qrylz " + VERSION,
                     "signature verification test harness",
                     "Alienkrishn [Anon4You]",
                     "https://github.com/Anon4You/Qrylz",
