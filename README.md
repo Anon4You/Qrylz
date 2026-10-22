@@ -1,80 +1,58 @@
 # Qrylz
 
-Command line tool that patches an Android APK so that **signature verification keeps
-working after the APK has been re-signed**.
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Java 17](https://img.shields.io/badge/java-17-blue.svg)](https://openjdk.org/)
+[![Gradle](https://img.shields.io/badge/gradle-9-green.svg)](https://gradle.org/)
 
-It is meant for **APKs you own or are authorised to test** - your own app, an app you
-contribute to, a lab build. Using it to defeat the licence checks of third party apps is
-not the intended use and may break their terms.
+Patch an Android APK so that **signature verification keeps working after the APK has been
+re-signed** - without the apk growing by the size of a second copy of itself.
 
-## How it works
-
-Three things have to be true for an app to keep working after it was re-signed:
-
-| Check | Where | Qrylz |
-| --- | --- | --- |
-| the app asks the package manager for its own signature | java | the parcel creator of `PackageInfo` is replaced, so every package info that is unmarshalled reports the original certificate |
-| the app reads the certificate out of the apk file | native | a small library redirects the opens of the apk to a copy of the original apk |
-| the app must still start | - | `android:appComponentFactory` points at the payload, so it runs before the application class |
-
-The original apk is kept **byte for byte** as the prefix of the patched apk, so the
-payload can serve it without carrying a second copy around.
+Qrylz is a command line tool. It merges split apks, reads the original signing
+certificate, injects a small payload and writes the patched apk out. The result is
+**not signed**, sign it with your own key afterwards.
 
 ```
- patched apk
- +----------------------------------------------------+
- |  the original apk, unchanged  |  AndroidManifest.xml   <- patched
- |  (the payload serves this)    |  classes5.dex          <- the payload
- |                                |  lib/.../hook.so       <- the native hook
- +----------------------------------------------------+
- |  central directory, end record                      |
- +----------------------------------------------------+
+ original.apk  73.8 MB
+ patched.apk   74.4 MB   (+617 KB)
 ```
 
-Because the original bytes are already there, the apk only grows by the new entries and
-one more central directory: **about 600 KB** instead of the 90 MB a second copy of the
-apk would cost.
+---
 
-## Compared to the tools it replaces
+## What it does
 
-| | MT Manager | NP Manager | Qrylz |
-| --- | --- | --- | --- |
-| certificate reported | a hard coded fake one | the original one | the original one |
-| apk grows by | ~3.5 MB | ~1.3 MB | ~0.6 MB |
-| application class | replaced | replaced | **kept**, the payload uses the component factory |
-| apk kept inside the apk | a second full copy | the same bytes, reused | the same bytes, reused |
+An application that checks its own signature has to be able to find a certificate. There
+are two places it can look, and both have to keep working after the apk was signed with a
+different key:
 
-The certificate is the important difference: the fake certificate of MT Manager does not
-match the one the application expects, so a check against the store certificate still
-fails.
+| Where the check happens | What Qrylz does |
+| --- | --- |
+| the application asks the package manager for its own signature | the parcel creator of `PackageInfo` is replaced, so every package info that is unmarshalled reports the original certificate |
+| the application reads the certificate out of the apk file, usually from native code | the opens of the apk are redirected to a copy of the original apk |
+| the application has to start at all | `android:appComponentFactory` points at the payload, so it runs before the application class is loaded |
 
-## Build
+The original apk is kept **byte for byte** as the prefix of the patched apk:
 
-```bash
-./gradlew shadowJar          # -> build/libs/qrylz.jar  (about 2.4 MB)
-./gradlew run --args="-i app.apk -o patched.apk --lib native/build/libqrylz_hook.so"
+```
+ patched.apk
+ +----------------------------------------------------------------+
+ |  the original apk, unchanged  |  AndroidManifest.xml   <- patched  |
+ |  (the payload serves this)    |  classes5.dex          <- payload  |
+ |                               |  lib/arm64-v8a/...so   <- the hook  |
+ +----------------------------------------------------------------+
+ |  central directory, end record                                  |
+ +----------------------------------------------------------------+
 ```
 
-The fat jar is shrunk with proguard, the framework apks that ARSCLib ships as
-resources are dropped.
+Because those bytes are already in the file, the patched apk only grows by the entries
+that were added and by one more central directory.
 
-Needs a JDK 17 and the Android SDK for `d8`, which builds the payload dex. The native
-hook is built with the NDK:
-
-```bash
-cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
-      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
-      -DCMAKE_BUILD_TYPE=Release -B native/build native
-cmake --build native/build
-```
-
-`local.properties` points at the SDK:
-
-```properties
-sdk.dir=/path/to/android-sdk
-```
+---
 
 ## Usage
+
+```bash
+java -jar qrylz.jar -i app.apk -o patched.apk --lib libqrylz_hook.so
+```
 
 ```
 Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
@@ -87,25 +65,139 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -V, --version        Print version information and exit.
 ```
 
-The output is **not signed**, so that the jar does not have to carry a signing
-library. Sign it with your own key afterwards:
+### Signing
+
+The tool does not sign, so that it does not have to carry a signing library. Sign the
+result with your own key:
 
 ```bash
 apksigner sign --ks my.jks --out signed.apk patched.apk
 ```
 
-Do not run `zipalign` over the output. It cannot relocate the apk signature
-block, and the block is what the payload serves to the application. The entries
-Qrylz adds are aligned on their own.
+Do **not** run `zipalign` over the result. It cannot relocate the apk signature block,
+and that block is what the payload serves to the application. The entries Qrylz adds are
+aligned on their own.
 
-## Layout
+---
+
+## Build
+
+```bash
+./gradlew shadowJar
+```
+
+The fat jar lands in `build/libs/qrylz.jar` and is about 2.4 MB.
+
+Two things are needed besides a JDK 17:
+
+* the **Android SDK**, for `d8`, which turns the payload into `payload.dex`
+* the **Android NDK**, for the native hook
+
+```properties
+# local.properties
+sdk.dir=/path/to/android-sdk
+```
+
+The native hook is built separately:
+
+```bash
+cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_BUILD_TYPE=Release -B native/build native
+cmake --build native/build
+```
+
+Prebuilt binaries for both are attached to every release.
+
+---
+
+## How it works
+
+### The java level
+
+Every `PackageInfo` that comes back from the package manager is unmarshalled through
+`PackageInfo.CREATOR`. Replacing that creator with one that swaps the certificate is
+enough to cover every caller - the package manager can be asked in many different ways
+and all of them end up in the same creator.
+
+```java
+Parcelable.Creator<PackageInfo> creator = new Parcelable.Creator<PackageInfo>() {
+    public PackageInfo createFromParcel(Parcel source) {
+        PackageInfo info = original.createFromParcel(source);
+        if (packageName.equals(info.packageName)) {
+            info.signatures[0] = originalSignature;
+        }
+        return info;
+    }
+    ...
+};
+```
+
+Both the deprecated `signatures` array and the `signingInfo` of Android 9 and newer are
+filled, because an application may read either.
+
+### The native level
+
+Code that reads the certificate out of the apk file opens the apk through the libc. A
+small native library replaces the `open`, `open64`, `openat` and `openat64` calls of
+every loaded module and serves a copy of the original apk instead. The path of the apk
+is found in the memory maps of the process, which is where the native code looks for it
+as well.
+
+### The start
+
+`android:appComponentFactory` is the earliest point the platform offers: it asks the
+factory for the application instance before the application class is loaded, so the
+payload is in place before any native library of the application can cache the real
+package manager. The factory that was in the manifest before is kept and still does the
+actual instantiation, so an application that relies on its own factory keeps working.
+
+---
+
+## Project layout
 
 | Path | Contents |
 | --- | --- |
-| `src/main/java/alienkrishn/qrylz/Qrylz.java` | CLI and pipeline |
-| `.../SignatureExtractor.java` | reads the original certificate |
+| `src/main/java/alienkrishn/qrylz/Qrylz.java` | the command line and the pipeline |
+| `.../SignatureExtractor.java` | reads the original certificate out of the apk |
 | `.../ManifestEditor.java` | patches the binary manifest with ARSCLib |
 | `.../ApkOverlapper.java` | writes the apk with the original as its prefix |
-| `.../DexInjector.java` | dexlib2 patching of the payload |
+| `.../DexInjector.java` | patches the payload dex with dexlib2 |
 | `payload/` | the runtime half, compiled to `payload.dex` with the SDK `d8` |
 | `native/` | the native hook, built with the NDK |
+
+---
+
+## Third party libraries
+
+| Library | Project | License | Used for |
+| --- | --- | --- | --- |
+| **ARSCLib** | [REAndroid/ARSCLib](https://github.com/REAndroid/ARSCLib) | Apache 2.0 | reading and writing the binary `AndroidManifest.xml`, the resource table and the apk |
+| **smali-dexlib2** | [AOSP smali](https://github.com/google/smali) | Apache 2.0 | reading, patching and writing the dex files |
+| **Picocli** | [remkop/picocli](https://github.com/remkop/picocli) | Apache 2.0 | the command line interface |
+| **Guava** | [google/guava](https://github.com/google/guava) | Apache 2.0 | a dependency of dexlib2 |
+
+The Android SDK (`d8`) and the Android NDK are used at build time only.
+
+---
+
+## Disclaimer
+
+Qrylz is meant for **apks you own or are authorised to test** - your own application, an
+application you contribute to, a lab build.
+
+It bypasses signature verification. Using it on third party software defeats the licence
+checks those applications rely on and is not the intended use. The authors are not
+responsible for any misuse of this tool.
+
+---
+
+## License
+
+```
+MIT License
+
+Copyright (c) 2026 Anon4You
+```
+
+See [LICENSE](LICENSE).
