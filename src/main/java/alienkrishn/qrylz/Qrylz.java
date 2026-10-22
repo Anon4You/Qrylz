@@ -290,11 +290,11 @@ public final class Qrylz implements Callable<Integer> {
     }
 
     private static final String[] LOGO = {
-            " ███  ████  █   █ █     █   █ █████",
-            "█   █ █   █  █ █  █      █ █     █",
-            "█ █ █ ████    █   █       █     █",
-            "█  █  █  █    █   █       █    █",
-            " ██ █ █   █   █   █████   █   █████",
+            " ███  ████  █   █ █     █████",
+            "█   █ █   █  █ █  █        █",
+            "█ █ █ ████    █   █       █",
+            "█  █  █  █    █   █      █",
+            " ██ █ █   █   █   █████ █████",
     };
 
     /** What is printed on the right side of the logo. */
