@@ -59,8 +59,14 @@ public final class DexInjector {
     /** Placeholder in the payload that carries the original app component factory. */
     public static final String FACTORY_PLACEHOLDER = "PLACEHOLDER_FACTORY";
 
+    /** Placeholder in the payload that carries the size of the original apk. */
+    public static final String ORIGIN_SIZE_PLACEHOLDER = "PLACEHOLDER_ORIGIN_SIZE";
+
     /** Payload entry point that is called from the patched application class. */
     public static final String PAYLOAD_CLASS = "alienkrishn.qrylz.payload.QrylzPayload";
+
+    /** Method of the payload that is called from the patched application class. */
+    public static final String PAYLOAD_ENTRY = "start";
 
     private static final String CONTEXT_TYPE = "Landroid/content/Context;";
 
@@ -422,7 +428,7 @@ public final class DexInjector {
                 0,
                 new ImmutableMethodReference(
                         toType(payloadClass),
-                        "install",
+                        PAYLOAD_ENTRY,
                         Collections.singletonList(CONTEXT_TYPE),
                         "V"));
     }

@@ -2,165 +2,172 @@ package alienkrishn.qrylz.payload;
 
 import android.content.Context;
 import android.content.pm.PackageInfo;
-import android.content.pm.PackageManager;
 import android.content.pm.Signature;
+import android.os.Build;
+import android.os.Parcel;
+import android.os.Parcelable;
 import android.util.Base64;
 import android.util.Log;
 
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Proxy;
-import java.util.Arrays;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * Runtime half of Qrylz.
  * <p>
- * This class is compiled into {@code payload.dex}, injected into the target APK and
- * started from the target Application's {@code attachBaseContext}. It replaces the
- * {@code IPackageManager} instance held by {@code ActivityThread} with a dynamic proxy
- * that reports the <em>original</em> signing certificate instead of the certificate the
- * APK was re-signed with.
- * <p>
- * The certificate is embedded by the Qrylz CLI, which replaces the
- * {@link #SIGNATURE_BASE64} placeholder with the Base64 encoded DER of the certificate
- * taken from the untouched APK.
- * <p>
- * Accessing {@code ActivityThread.mPackageManager} is a hidden API call. On Android 9 and
- * newer that is rejected unless hidden API enforcement has been lifted, which is what the
- * accompanying native hook ({@code libqrylz_hook.so}) does before this class runs.
+ * Two things are needed to keep signature verification working after the apk was
+ * re-signed:
+ * <ul>
+ *   <li>the java level check - every {@link PackageInfo} that is unmarshalled from a
+ *       binder has to report the original certificate. That is done by replacing the
+ *       parcel creator of {@link PackageInfo}, which covers every code path that asks
+ *       the package manager for the signature.</li>
+ *   <li>the native level check - code that reads the certificate out of the apk file
+ *       itself. The apk is opened through the libc, so a small native library redirects
+ *       the opens of the apk to a copy of the original apk.</li>
+ * </ul>
  */
 public final class QrylzPayload {
 
     private static final String TAG = "Qrylz";
 
-    /** Name of the native hook library, without the lib prefix and the .so suffix. */
-    private static final String NATIVE_HOOK = "qrylz_hook";
-
     /**
-     * Placeholder replaced by the Qrylz CLI with the Base64 encoded DER of the original
-     * signing certificate. Kept as a constant so it lands in the dex string pool and can
-     * be patched in place.
+     * Replaced by the Qrylz CLI with the Base64 of the original signing certificate.
      */
     public static final String SIGNATURE_BASE64 = "PLACEHOLDER_SIG";
 
     /**
-     * Placeholder for the app component factory that was in the manifest before the
-     * patch. It is still used to instantiate the components of the application.
+     * Replaced by the Qrylz CLI with the name of the factory that was in the manifest
+     * before the patch.
      */
     public static final String ORIGINAL_FACTORY = "PLACEHOLDER_FACTORY";
 
-    private static volatile boolean installed;
+    /**
+     * Replaced by the Qrylz CLI with the size of the original apk inside the patched
+     * one. The first bytes of the patched apk are the original apk, byte for byte.
+     */
+    public static final String ORIGIN_SIZE = "PLACEHOLDER_ORIGIN_SIZE";
 
-    /** Package name of the host application, the only one whose signature is rewritten. */
-    private static String hostPackage;
+    /** Entry the original apk is read from. */
+    private static final String ORIGIN_ASSET = "qrylz_origin.apk";
+
+    private static volatile boolean installed;
 
     private QrylzPayload() {
     }
 
     /**
-     * Installs the signature proxy. Safe to call more than once and never throws: a
-     * failure here must not take the host application down with it.
+     * Starts the payload.
      *
-     * @param context any context of the host application
+     * @param packageName package name of the host application
+     * @param apkPath     path of the apk of the host application
      */
-    public static void install(Context context) {
-        if (context != null && hostPackage == null) {
-            hostPackage = context.getPackageName();
-        }
-        installProxy();
-    }
-
-    /**
-     * Installs the proxy without a context, used from the app component factory where
-     * the package name is all that is available.
-     *
-     * @param packageName the package name of the host application, may be {@code null}
-     */
-    public static void installForPackage(String packageName) {
-        if (packageName != null && !packageName.isEmpty() && hostPackage == null) {
-            hostPackage = packageName;
-        }
-        installProxy();
-    }
-
-    private static void installProxy() {
+    public static synchronized void install(String packageName, String apkPath) {
         if (installed) {
             return;
         }
-        if (hostPackage == null) {
-            // Without the package name the proxy cannot tell its own package apart from
-            // the others, so wait until the name is known.
+        installed = true;
+        try {
+            killPackageInfo(packageName);
+        } catch (Throwable t) {
+            Log.w(TAG, "Cannot patch the package info", t);
+        }
+        try {
+            killOpen(packageName, apkPath);
+        } catch (Throwable t) {
+            Log.w(TAG, "Cannot hook the apk path", t);
+        }
+    }
+
+    /**
+     * Starts the payload with a context, used when the application class was patched.
+     *
+     * @param context context of the host application
+     */
+    public static synchronized void install(Context context) {
+        if (context == null) {
             return;
         }
-        installed = true;
-        loadNativeHook();
-        try {
-            Signature original = originalSignature();
-            if (original == null) {
-                Log.w(TAG, "No original signature embedded, proxy not installed");
-                return;
-            }
-            if (installProxy(original)) {
-                Log.i(TAG, "Signature proxy installed");
-            } else {
-                Log.w(TAG, "Signature proxy not installed");
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "Signature proxy setup failed", t);
+        String packageName = context.getPackageName();
+        String apkPath = getApkPath(packageName);
+        if (apkPath == null) {
+            apkPath = context.getApplicationInfo() == null
+                    ? null : context.getApplicationInfo().sourceDir;
         }
+        install(packageName, apkPath);
     }
+
+    // ------------------------------------------------------------------ java level
 
     /**
-     * Reads the signature back through the package manager and logs it, so it can be
-     * checked against the certificate that was embedded at patch time.
-     */
-    private static void verify(Context context, Signature original) {
-        try {
-            PackageManager pm = context.getPackageManager();
-            PackageInfo info = pm.getPackageInfo(context.getPackageName(), PackageManager.GET_SIGNATURES);
-            Signature[] signatures = info.signatures;
-            if (signatures == null || signatures.length == 0) {
-                Log.w(TAG, "verify: no signature reported");
-                return;
-            }
-            for (Signature signature : signatures) {
-                boolean same = Arrays.equals(signature.toByteArray(), original.toByteArray());
-                Log.i(TAG, "verify: signature sha256=" + sha256(signature.toByteArray())
-                        + " matchesOriginal=" + same);
-            }
-        } catch (Throwable t) {
-            Log.w(TAG, "verify failed", t);
-        }
-    }
-
-    private static String sha256(byte[] data) {
-        try {
-            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(data);
-            StringBuilder sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "error";
-        }
-    }
-
-    /**
-     * Loads the native hook.
+     * Replaces the parcel creator of {@link PackageInfo}, so that every package info
+     * that is unmarshalled reports the original certificate.
      * <p>
-     * The hook lifts the hidden API restriction on {@code ActivityThread} and serves the
-     * original signature blocks to code that reads the APK file directly. Without it the
-     * proxy cannot be installed on Android 9 and newer.
+     * This is the way that covers all callers: the package manager is asked in many
+     * different ways and every answer is unmarshalled through the same creator.
      */
-    private static void loadNativeHook() {
+    private static void killPackageInfo(String packageName) throws Exception {
+        final Signature original = originalSignature();
+        if (original == null) {
+            Log.w(TAG, "No original signature embedded");
+            return;
+        }
+
+        Parcelable.Creator<PackageInfo> originalCreator = PackageInfo.CREATOR;
+        Parcelable.Creator<PackageInfo> creator = new Parcelable.Creator<PackageInfo>() {
+            @Override
+            public PackageInfo createFromParcel(Parcel source) {
+                PackageInfo info = originalCreator.createFromParcel(source);
+                if (info != null && packageName.equals(info.packageName)) {
+                    applyOriginal(info, original);
+                }
+                return info;
+            }
+
+            @Override
+            public PackageInfo[] newArray(int size) {
+                return originalCreator.newArray(size);
+            }
+        };
+
         try {
-            System.loadLibrary(NATIVE_HOOK);
-            Log.i(TAG, "Native hook loaded");
+            Field field = findField(PackageInfo.class, "CREATOR");
+            field.set(null, creator);
+            Log.i(TAG, "package info creator patched");
         } catch (Throwable t) {
-            Log.w(TAG, "Native hook " + NATIVE_HOOK + " not loaded", t);
+            // The field is final on some releases, then the parcel has to be patched
+            // instead.
+            Log.w(TAG, "Cannot replace the creator, patching the parcel caches", t);
+            clearParcelCaches();
+        }
+        clearPackageInfoCache();
+    }
+
+    private static void applyOriginal(PackageInfo info, Signature original) {
+        try {
+            if (info.signatures != null && info.signatures.length > 0) {
+                info.signatures[0] = original;
+            } else {
+                info.signatures = new Signature[]{original};
+            }
+        } catch (Throwable ignored) {
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && info.signingInfo != null) {
+                Signature[] signers = info.signingInfo.getApkContentsSigners();
+                if (signers != null && signers.length > 0) {
+                    signers[0] = original;
+                }
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -185,190 +192,176 @@ public final class QrylzPayload {
         }
     }
 
+    // ------------------------------------------------------------------ native level
+
     /**
-     * Swaps the package manager of the process for a proxy that rewrites the signature
-     * of package infos that belong to this process.
-     * <p>
-     * The field that holds the package manager moved between Android releases
-     * ({@code ActivityThread.mPackageManager} became the static
-     * {@code ActivityThread.sPackageManager}), so it is looked up by name first and by
-     * type afterwards.
+     * Extracts the original apk and lets the native library serve it instead of the
+     * patched one.
      */
-    private static boolean installProxy(Signature original) {
+    private static void killOpen(String packageName, String apkPath) throws IOException {
+        if (apkPath == null) {
+            Log.w(TAG, "No apk path");
+            return;
+        }
+        File origin = extractOrigin(apkPath);
+        if (origin == null) {
+            Log.w(TAG, "No original apk found");
+            return;
+        }
+        if (!QrylzNative.init(apkPath, origin.getAbsolutePath())) {
+            return;
+        }
+        Log.i(TAG, "apk path hooked: " + apkPath + " -> " + origin.getAbsolutePath());
+    }
+
+    /**
+     * Writes the original apk - the first bytes of the patched one - into the files
+     * directory of the application.
+     */
+    private static File extractOrigin(String apkPath) throws IOException {
+        long originSize = originSize();
+        File target = new File(dataDir(), ORIGIN_ASSET);
+        if (target.isFile() && target.length() == originSize) {
+            return target;
+        }
+        File temporary = new File(dataDir(), ORIGIN_ASSET + ".part");
+        try (InputStream in = new java.io.FileInputStream(apkPath);
+             OutputStream out = new FileOutputStream(temporary)) {
+            byte[] buffer = new byte[65536];
+            long total = 0;
+            while (total < originSize) {
+                int read = in.read(buffer, 0, (int) Math.min(buffer.length, originSize - total));
+                if (read <= 0) {
+                    break;
+                }
+                out.write(buffer, 0, read);
+                total += read;
+            }
+            if (total != originSize) {
+                throw new IOException("The original apk is shorter than expected");
+            }
+        }
+        if (!temporary.renameTo(target)) {
+            return temporary;
+        }
+        Log.i(TAG, "original apk extracted (" + target.length() + " bytes)");
+        return target;
+    }
+
+    /**
+     * @return the size of the original apk inside the patched one
+     */
+    private static long originSize() {
         try {
-            Class<?> threadClass = Class.forName("android.app.ActivityThread");
-            Method current = threadClass.getMethod("currentActivityThread");
-            Object activityThread = current.invoke(null);
-            if (activityThread == null) {
-                return false;
-            }
-
-            Field field = findPackageManagerField(threadClass);
-            if (field == null) {
-                Log.w(TAG, "No package manager field on ActivityThread");
-                return false;
-            }
-            field.setAccessible(true);
-
-            boolean isStatic = Modifier.isStatic(field.getModifiers());
-            Object manager = isStatic ? field.get(null) : field.get(activityThread);
-            if (manager == null || Proxy.isProxyClass(manager.getClass())) {
-                return false;
-            }
-
-            Class<?>[] interfaces = manager.getClass().getInterfaces();
-            if (interfaces.length == 0) {
-                return false;
-            }
-
-            Object proxy = Proxy.newProxyInstance(
-                    manager.getClass().getClassLoader(),
-                    interfaces,
-                    new SignatureHandler(manager, original));
-            if (isStatic) {
-                field.set(null, proxy);
-            } else {
-                field.set(activityThread, proxy);
-            }
-            Log.i(TAG, "Package manager field: " + field.getName() + " (static=" + isStatic + ")");
-            return true;
+            return Long.parseLong(ORIGIN_SIZE);
         } catch (Throwable t) {
-            Log.w(TAG, "Cannot reach the package manager of ActivityThread", t);
-            return false;
+            return 0;
         }
     }
 
     /**
-     * Finds the field that holds the {@code IPackageManager} of the process.
+     * Finds the apk of the application in the memory maps of the process.
+     * <p>
+     * The source directory of the application info is not always the path the native
+     * code uses, the memory maps are.
      */
-    private static Field findPackageManagerField(Class<?> threadClass) {
-        for (String name : new String[]{"sPackageManager", "mPackageManager"}) {
-            try {
-                return threadClass.getDeclaredField(name);
-            } catch (Throwable ignored) {
-                // not present on this release, try the next one
+    static String getApkPath(String packageName) {
+        try (BufferedReader reader = new BufferedReader(new FileReader("/proc/self/maps"))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String[] parts = line.split("\\s+");
+                String path = parts[parts.length - 1];
+                if (isApkPath(packageName, path)) {
+                    return path;
+                }
             }
-        }
-        // Fall back to a type based lookup so the payload keeps working when the field
-        // is renamed again.
-        for (Field field : threadClass.getDeclaredFields()) {
-            if ("android.content.pm.IPackageManager".equals(field.getType().getName())) {
-                return field;
-            }
+        } catch (Throwable ignored) {
         }
         return null;
     }
 
-    /**
-     * Forwards every call to the real package manager but rewrites the signature of
-     * package infos that belong to this process.
-     */
-    private static final class SignatureHandler implements InvocationHandler {
-
-        private final Object delegate;
-        private final Signature original;
-
-        SignatureHandler(Object delegate, Signature original) {
-            this.delegate = delegate;
-            this.original = original;
+    private static boolean isApkPath(String packageName, String path) {
+        if (!path.startsWith("/") || !path.endsWith(".apk")) {
+            return false;
         }
-
-        @Override
-        public Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
-            Object result = method.invoke(delegate, args);
-            if (isHostPackage(args)) {
-                Log.i(TAG, "pm call: " + method.getName() + " -> "
-                        + (result == null ? "null" : result.getClass().getSimpleName()));
-                if (result instanceof PackageInfo) {
-                    PackageInfo info = (PackageInfo) result;
-                    info.signatures = new Signature[]{original};
-                    applySigningInfo(info, original);
-                    applyApplicationInfoSignatures(info, original);
-                }
+        String[] parts = path.substring(1).split("/", 6);
+        int count = parts.length;
+        if (count == 4 || count == 5) {
+            if (parts[0].equals("data") && parts[1].equals("app")
+                    && parts[count - 1].equals("base.apk")) {
+                return parts[count - 2].startsWith(packageName);
             }
-            return result;
+            if (parts[0].equals("mnt") && parts[1].equals("asec")
+                    && parts[count - 1].equals("pkg.apk")) {
+                return parts[count - 2].startsWith(packageName);
+            }
+        } else if (count == 3) {
+            if (parts[0].equals("data") && parts[1].equals("app")) {
+                return parts[2].startsWith(packageName);
+            }
+        } else if (count == 6) {
+            if (parts[0].equals("mnt") && parts[1].equals("expand") && parts[3].equals("app")
+                    && parts[5].equals("base.apk")) {
+                return parts[4].endsWith(packageName);
+            }
         }
+        return false;
+    }
 
-        /**
-         * {@code ApplicationInfo} carries its own copy of the signatures. It is not part
-         * of the public sdk any more, so it is reached by reflection.
-         */
-        private void applyApplicationInfoSignatures(PackageInfo info, Signature original) {
+    // ------------------------------------------------------------------ helpers
+
+    private static File dataDir() {
+        return new File("/data/data/" + hostPackageName());
+    }
+
+    private static String hostPackageName() {
+        try {
+            Class<?> threadClass = Class.forName("android.app.ActivityThread");
+            Object thread = threadClass.getMethod("currentActivityThread").invoke(null);
+            Field field = findField(threadClass, "mBoundApplication");
+            Object bound = field.get(thread);
+            if (bound == null) {
+                return "";
+            }
+            Object info = findField(bound.getClass(), "appInfo").get(bound);
+            return info == null ? "" : (String) findField(info.getClass(), "packageName").get(info);
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    private static void clearPackageInfoCache() {
+        try {
+            Class<?> pmClass = Class.forName("android.content.pm.PackageManager");
+            Object cache = findField(pmClass, "sPackageInfoCache").get(null);
+            cache.getClass().getMethod("clear").invoke(cache);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static void clearParcelCaches() {
+        for (String name : new String[]{"mCreators", "sPairedCreators"}) {
             try {
-                Object applicationInfo = PackageInfo.class.getField("applicationInfo").get(info);
-                if (applicationInfo == null) {
-                    return;
+                Object map = findField(Parcel.class, name).get(null);
+                if (map instanceof java.util.Map) {
+                    ((java.util.Map<?, ?>) map).clear();
                 }
-                java.lang.reflect.Field field =
-                        applicationInfo.getClass().getField("signatures");
-                field.set(applicationInfo, new Signature[]{original});
             } catch (Throwable ignored) {
-                // Not present on this release.
             }
         }
+    }
 
-        /**
-         * Fills {@code PackageInfo.signingInfo} as well.
-         * <p>
-         * Since Android 9 the system hands the signing certificates over in
-         * {@code signingInfo} and leaves the deprecated {@code signatures} array empty.
-         * Which of the two an application reads is not visible from the outside, so both
-         * are filled. {@code SigningInfo} does not exist before Android 9, therefore it
-         * is reached by reflection.
-         */
-        private void applySigningInfo(PackageInfo info, Signature original) {
+    private static Field findField(Class<?> clazz, String fieldName) throws NoSuchFieldException {
+        Class<?> current = clazz;
+        while (current != null && !current.equals(Object.class)) {
             try {
-                Class<?> signingInfoClass = Class.forName("android.content.pm.SigningInfo");
-                java.lang.reflect.Field field = PackageInfo.class.getField("signingInfo");
-                Object existing = field.get(info);
-                int scheme = 2;
-                if (existing != null) {
-                    scheme = (Integer) existing.getClass()
-                            .getMethod("getSchemeVersion").invoke(existing);
-                }
-                java.util.Collection<Signature> one = java.util.Collections.singletonList(original);
-                Object signingInfo = signingInfoClass
-                        .getConstructor(int.class, java.util.Collection.class,
-                                java.util.Collection.class, java.util.Collection.class)
-                        .newInstance(scheme, one, java.util.Collections.emptyList(), one);
-                field.set(info, signingInfo);
-            } catch (Throwable ignored) {
-                // Android 8 and older, or a different field layout - the deprecated
-                // signatures array is enough there.
+                Field field = current.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                return field;
+            } catch (NoSuchFieldException ignored) {
+                current = current.getSuperclass();
             }
         }
-
-        /**
-         * Methods that only take a uid cannot be attributed to a package name.
-         */
-        private boolean methodUsesUidOnly(Object[] args) {
-            return !(args[0] instanceof String)
-                    && !args[0].getClass().getName().contains("VersionedPackage");
-        }
-
-        /**
-         * Only the host package may be rewritten. The package manager is asked about
-         * other packages too - the WebView provider for example - and handing out our
-         * certificate for those would break their own signature checks.
-         */
-        private boolean isHostPackage(Object[] args) {
-            if (hostPackage == null || args == null || args.length == 0) {
-                return false;
-            }
-            if (methodUsesUidOnly(args)) {
-                return false;
-            }
-            Object first = args[0];
-            if (first instanceof String) {
-                return hostPackage.equals(first);
-            }
-            // android.pm.VersionedPackage
-            try {
-                Object name = first.getClass().getMethod("getPackageName").invoke(first);
-                return hostPackage.equals(name);
-            } catch (Throwable ignored) {
-                return false;
-            }
-        }
+        throw new NoSuchFieldException(fieldName);
     }
 }

@@ -16,3 +16,6 @@ keystore.properties
 .idea/
 *.iml
 .vscode/
+
+# native build output
+native/build/

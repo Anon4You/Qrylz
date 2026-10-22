@@ -3,23 +3,21 @@ package alienkrishn.qrylz;
 import com.android.tools.smali.dexlib2.DexFileFactory;
 import com.android.tools.smali.dexlib2.iface.DexFile;
 import com.android.tools.smali.dexlib2.iface.MultiDexContainer;
-import com.reandroid.apk.ApkBundle;
-import com.reandroid.apk.ApkModule;
-import com.reandroid.archive.ByteInputSource;
-import com.reandroid.archive.FileInputSource;
-import com.reandroid.arsc.chunk.xml.ResXmlAttribute;
-import com.reandroid.arsc.chunk.xml.ResXmlElement;
+
 import picocli.CommandLine;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Callable;
@@ -33,13 +31,14 @@ import java.util.zip.ZipFile;
  * The pipeline is:
  * <ol>
  *   <li>merge a split APK set into a single APK</li>
- *   <li>read the original signing certificate and the original {@code META-INF} folder</li>
- *   <li>pack the {@code META-INF} folder into {@code assets/qrylz_origin.zip}</li>
+ *   <li>read the original signing certificate</li>
+ *   <li>patch the manifest so the payload starts before the application class</li>
  *   <li>patch the signature placeholder inside the payload dex</li>
- *   <li>merge the payload into the application dex and hook the application class</li>
- *   <li>write the patched APK</li>
+ *   <li>write the original apk as a prefix and append the payload</li>
  * </ol>
- * The result is not signed. Sign it with your own key afterwards.
+ * The original apk stays inside the new one, byte for byte, so the payload can serve it
+ * to a check that reads the certificate out of the apk file. The result is not signed, it
+ * has to be signed with a key afterwards.
  */
 @Command(
         name = "qrylz",
@@ -50,14 +49,11 @@ import java.util.zip.ZipFile;
 )
 public final class Qrylz implements Callable<Integer> {
 
-    /** Application class used when the manifest does not declare one. */
-    private static final String FALLBACK_APPLICATION = "alienkrishn.qrylz.payload.QrylzApplication";
-
     /** Factory that installs the payload before the application class is loaded. */
     private static final String APP_COMPONENT_FACTORY =
             "alienkrishn.qrylz.payload.QrylzAppComponentFactory";
 
-    /** Native hook that is loaded from the patched application class. */
+    /** Native hook that redirects the opens of the apk. */
     private static final String NATIVE_HOOK = "qrylz_hook";
 
     @Option(names = {"-i", "--input"}, required = true, paramLabel = "<apk>",
@@ -87,119 +83,45 @@ public final class Qrylz implements Callable<Integer> {
         log("certificate: " + signature.getCertificateEntry()
                 + "  sha256=" + signature.getSha256());
 
-        byte[] originArchive = SignatureExtractor.buildOriginArchive(
-                signature.getMetaInf(), signature.getCertificateDer());
-        log("origin archive: " + SignatureExtractor.ORIGIN_ARCHIVE
-                + " (" + originArchive.length + " bytes, " + signature.getMetaInf().size() + " entries)");
+        // The original apk becomes the prefix of the new one.
+        long originSize = apk.length();
 
-        try (ApkModule module = ApkModule.loadApkFile(apk)) {
-            // The app component factory is the earliest hook point: the system asks it
-            // for the application instance before the application class is loaded. The
-            // factory that is already in the manifest is kept and still used.
-            String originalFactory = swapAppComponentFactory(module);
+        // The manifest points at the payload factory, the application class stays as it is.
+        ManifestEditor.Result manifest = ManifestEditor.setAppComponentFactory(
+                apk, APP_COMPONENT_FACTORY);
+        log("manifest: appComponentFactory -> " + APP_COMPONENT_FACTORY
+                + (manifest.getPreviousFactory().isEmpty()
+                ? "" : " (was " + manifest.getPreviousFactory() + ")"));
 
-            Map<String, String> placeholders = new LinkedHashMap<>();
-            placeholders.put(DexInjector.PLACEHOLDER, signature.getBase64());
-            placeholders.put(DexInjector.FACTORY_PLACEHOLDER, originalFactory);
-            DexFile payloadDex = DexInjector.loadPatchedPayload(readPayload(), placeholders);
-            log("payload: placeholders patched");
+        // The payload carries the original certificate and the size of the original apk.
+        Map<String, String> placeholders = new LinkedHashMap<>();
+        placeholders.put(DexInjector.PLACEHOLDER, signature.getBase64());
+        placeholders.put(DexInjector.FACTORY_PLACEHOLDER, manifest.getPreviousFactory());
+        placeholders.put(DexInjector.ORIGIN_SIZE_PLACEHOLDER, String.valueOf(originSize));
+        DexFile payloadDex = DexInjector.loadPatchedPayload(readPayload(), placeholders);
+        log("payload: placeholders patched");
 
-            String applicationClass = module.getAndroidManifest().getApplicationClassName();
-            if (applicationClass == null || applicationClass.isEmpty()) {
-                applicationClass = FALLBACK_APPLICATION;
-                module.getAndroidManifest().setApplicationClassName(applicationClass);
-                log("manifest: no custom application class, using " + applicationClass);
-            } else {
-                log("application class: " + applicationClass);
-            }
-
-            MultiDexContainer<? extends DexFile> container = DexFileFactory.loadDexContainer(apk, null);
-            String dexName = null;
-            DexFile targetDex = null;
-            for (String name : container.getDexEntryNames()) {
-                MultiDexContainer.DexEntry<? extends DexFile> entry = container.getEntry(name);
-                if (entry == null) {
-                    continue;
-                }
-                DexFile candidate = entry.getDexFile();
-                if (candidate != null && DexInjector.containsClass(candidate, applicationClass)) {
-                    dexName = name;
-                    targetDex = candidate;
-                    break;
-                }
-            }
-            if (targetDex == null) {
-                throw new IOException("Application class " + applicationClass + " not found in any dex");
-            }
-            log("target dex: " + dexName);
-
-            DexFile merged = DexInjector.merge(targetDex, payloadDex);
-            boolean existing = DexInjector.hasAttachBaseContext(merged, applicationClass);
-            DexFile hooked = DexInjector.injectApplicationHook(
-                    merged, applicationClass, DexInjector.PAYLOAD_CLASS);
-            log("hook: " + (existing
-                    ? "patched attachBaseContext of " + applicationClass
-                    : "created attachBaseContext in " + applicationClass));
-
-            File patchedDex = File.createTempFile("qrylz-", ".dex");
-            patchedDex.deleteOnExit();
-            DexInjector.writeDexFile(hooked, patchedDex);
-
-            module.getZipEntryMap().remove(dexName);
-            module.add(new FileInputSource(patchedDex, dexName));
-
-            String originPath = "assets/" + SignatureExtractor.ORIGIN_ARCHIVE;
-            module.getZipEntryMap().remove(originPath);
-            module.add(new ByteInputSource(originArchive, originPath));
-
-            if (nativeHook != null) {
-                String libPath = "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so";
-                module.getZipEntryMap().remove(libPath);
-                module.add(new FileInputSource(nativeHook, libPath));
-                log("native hook: " + libPath);
-            }
-
-            // The old signature no longer matches the patched content. Drop it so the
-            // result stays installable once it is signed with a fresh key. The original
-            // blocks are preserved in assets/qrylz_origin.zip.
-            module.getZipEntryMap().removeIf(source -> source.getName().startsWith("META-INF/"));
-            module.setApkSignatureBlock(null);
-            log("removed the stale signature, the output has to be signed again");
-
-            File parent = output.getAbsoluteFile().getParentFile();
-            if (parent != null) {
-                Files.createDirectories(parent.toPath());
-            }
-            module.writeApk(output);
+        String dexName = freeDexName(apk);
+        List<ApkOverlapper.NewEntry> entries = new ArrayList<>();
+        entries.add(new ApkOverlapper.NewEntry("AndroidManifest.xml", manifest.getManifest()));
+        entries.add(new ApkOverlapper.NewEntry(dexName, toBytes(payloadDex)));
+        if (nativeHook != null) {
+            entries.add(new ApkOverlapper.NewEntry(
+                    "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so",
+                    Files.readAllBytes(nativeHook.toPath())));
+            log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so");
         }
 
-        log("written: " + output.getAbsolutePath());
+        File parent = output.getAbsoluteFile().getParentFile();
+        if (parent != null) {
+            Files.createDirectories(parent.toPath());
+        }
+        long written = ApkOverlapper.write(apk, output, entries);
+        log("written: " + output.getAbsolutePath() + " (" + output.length() + " bytes, origin "
+                + written + " bytes)");
+
         log("done - sign the output APK with your own key before installing it");
         return 0;
-    }
-
-    /**
-     * Points {@code android:appComponentFactory} at the payload factory so the proxy is
-     * installed before the application class - and with it any native library - is
-     * loaded.
-     *
-     * @param module the apk being patched
-     * @return the factory that was in the manifest before, empty when there was none
-     */
-    private String swapAppComponentFactory(ApkModule module) {
-        ResXmlElement application = module.getAndroidManifest().getOrCreateApplicationElement();
-        for (java.util.Iterator<ResXmlAttribute> it = application.getAttributes(); it.hasNext();) {
-            ResXmlAttribute attribute = it.next();
-            if (!"appComponentFactory".equals(attribute.getName())) {
-                continue;
-            }
-            String original = attribute.getValueString();
-            attribute.setValueAsString(APP_COMPONENT_FACTORY);
-            log("manifest: appComponentFactory " + original + " -> " + APP_COMPONENT_FACTORY);
-            return original == null ? "" : original;
-        }
-        log("manifest: no appComponentFactory, the payload is started from attachBaseContext");
-        return "";
     }
 
     /**
@@ -222,17 +144,17 @@ public final class Qrylz implements Callable<Integer> {
     /**
      * Merges the APKs of a split set into a single APK.
      * <p>
-     * This is the same engine the APKEditor command line uses: {@code ApkBundle} reads
-     * every module of the directory, merges the manifests and the resource tables and
-     * hands back one {@code ApkModule}.
+     * This is the engine the APKEditor command line uses: {@code ApkBundle} reads every
+     * module of the directory, merges the manifests and the resource tables and hands
+     * back one {@code ApkModule}.
      */
     private File mergeSplits(File directory) throws IOException {
         File merged = File.createTempFile("qrylz-merged-", ".apk");
         merged.deleteOnExit();
 
-        try (ApkBundle bundle = new ApkBundle()) {
+        try (com.reandroid.apk.ApkBundle bundle = new com.reandroid.apk.ApkBundle()) {
             bundle.loadApkDirectory(directory);
-            try (ApkModule module = bundle.mergeModules()) {
+            try (com.reandroid.apk.ApkModule module = bundle.mergeModules()) {
                 module.refreshTable();
                 module.refreshManifest();
                 module.writeApk(merged);
@@ -257,6 +179,61 @@ public final class Qrylz implements Callable<Integer> {
             }
             return in.readAllBytes();
         }
+    }
+
+    /**
+     * @return a dex name that is not used by the apk yet
+     */
+    private String freeDexName(File apk) throws IOException {
+        List<String> used = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            for (Enumeration<? extends ZipEntry> it = zip.entries(); it.hasMoreElements(); ) {
+                String name = it.nextElement().getName();
+                if (name.startsWith("classes") && name.endsWith(".dex")) {
+                    used.add(name);
+                }
+            }
+        }
+        for (int i = 2; i < 100; i++) {
+            String name = "classes" + i + ".dex";
+            if (!used.contains(name)) {
+                return name;
+            }
+        }
+        throw new IOException("No free dex name left");
+    }
+
+    /**
+     * @return the raw bytes of an entry of the apk
+     */
+    private static byte[] readEntry(File apk, String name) throws IOException {
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry entry = zip.getEntry(name);
+            if (entry == null) {
+                throw new IOException("No " + name + " in " + apk);
+            }
+            try (InputStream in = zip.getInputStream(entry)) {
+                ByteArrayOutputStream out = new ByteArrayOutputStream();
+                byte[] buffer = new byte[65536];
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                }
+                return out.toByteArray();
+            }
+        }
+    }
+
+    /**
+     * @return the dex written to bytes
+     */
+    private static byte[] toBytes(DexFile dex) throws IOException {
+        File temporary = File.createTempFile("qrylz-payload", ".dex");
+        temporary.deleteOnExit();
+        DexFileFactory.writeDexFile(temporary.getAbsolutePath(), dex);
+        byte[] data = Files.readAllBytes(temporary.toPath());
+        temporary.delete();
+        return data;
     }
 
     private static void unzip(File archive, File target) throws IOException {

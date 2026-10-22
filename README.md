@@ -7,37 +7,65 @@ It is meant for **APKs you own or are authorised to test** - your own app, an ap
 contribute to, a lab build. Using it to defeat the licence checks of third party apps is
 not the intended use and may break their terms.
 
-## What it does
+## How it works
 
-1. **Merge** - a split set (`.apks` / `.xapk` / `.apkm`) is merged into one APK with
-   APKEditor.
-2. **Extract** - the original signing certificate is read from `META-INF/CERT.RSA` and
-   the original `META-INF` folder is collected.
-3. **Tiny origin** - the original `META-INF` folder is zipped into
-   `assets/qrylz_origin.zip`. A few kilobytes instead of a second copy of the whole APK.
-4. **Patch** - the Base64 of the original certificate replaces the `PLACEHOLDER_SIG`
-   placeholder inside the payload dex (dexlib2), and the payload is merged into the
-   application dex.
-5. **Hook** - the application class gets a call to `QrylzPayload.install(Context)` in
-   `attachBaseContext`. That installs a dynamic proxy in front of the package manager so
-   the process keeps seeing the original certificate.
-6. **Write** - the patched APK is written out. It is **not signed**; sign it with your
-   own key afterwards.
+Three things have to be true for an app to keep working after it was re-signed:
 
-The native part (`libqrylz_hook.so`) is optional and injected with `--lib`. It is what
-lets the hook reach `ActivityThread.mPackageManager` on Android 9 and newer, where that
-is a hidden API, and what serves the original signature blocks to code that reads the APK
-file directly.
+| Check | Where | Qrylz |
+| --- | --- | --- |
+| the app asks the package manager for its own signature | java | the parcel creator of `PackageInfo` is replaced, so every package info that is unmarshalled reports the original certificate |
+| the app reads the certificate out of the apk file | native | a small library redirects the opens of the apk to a copy of the original apk |
+| the app must still start | - | `android:appComponentFactory` points at the payload, so it runs before the application class |
+
+The original apk is kept **byte for byte** as the prefix of the patched apk, so the
+payload can serve it without carrying a second copy around.
+
+```
+ patched apk
+ +----------------------------------------------------+
+ |  the original apk, unchanged  |  AndroidManifest.xml   <- patched
+ |  (the payload serves this)    |  classes5.dex          <- the payload
+ |                                |  lib/.../hook.so       <- the native hook
+ +----------------------------------------------------+
+ |  central directory, end record                      |
+ +----------------------------------------------------+
+```
+
+Because the original bytes are already there, the apk only grows by the new entries and
+one more central directory: **about 600 KB** instead of the 90 MB a second copy of the
+apk would cost.
+
+## Compared to the tools it replaces
+
+| | MT Manager | NP Manager | Qrylz |
+| --- | --- | --- | --- |
+| certificate reported | a hard coded fake one | the original one | the original one |
+| apk grows by | ~3.5 MB | ~1.3 MB | ~0.6 MB |
+| application class | replaced | replaced | **kept**, the payload uses the component factory |
+| apk kept inside the apk | a second full copy | the same bytes, reused | the same bytes, reused |
+
+The certificate is the important difference: the fake certificate of MT Manager does not
+match the one the application expects, so a check against the store certificate still
+fails.
 
 ## Build
 
 ```bash
 ./gradlew shadowJar          # -> build/libs/qrylz.jar
-./gradlew run --args="-i app.apk -o patched.apk"
+./gradlew run --args="-i app.apk -o patched.apk --lib native/build/libqrylz_hook.so"
 ```
 
-Needs a JDK 17 and an Android SDK (for `d8`, used to build the payload dex). Point
-`local.properties` at the SDK:
+Needs a JDK 17 and the Android SDK for `d8`, which builds the payload dex. The native
+hook is built with the NDK:
+
+```bash
+cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
+      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
+      -DCMAKE_BUILD_TYPE=Release -B native/build native
+cmake --build native/build
+```
+
+`local.properties` points at the SDK:
 
 ```properties
 sdk.dir=/path/to/android-sdk
@@ -56,36 +84,27 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -V, --version        Print version information and exit.
 ```
 
-## Status
+The output is **not signed**. Sign it with your own key afterwards:
 
-Verified end to end on a real split APK set (Android 13, arm64-v8a):
-
-| Step | Result |
-| --- | --- |
-| merge `.apks` | 4 modules merged into one APK |
-| read the certificate | taken from the **v2/v3 signature block** - modern APKs carry no `META-INF/CERT.RSA` |
-| origin archive | `assets/qrylz_origin.zip`, 29 KB |
-| patch the payload | the 744 character Base64 certificate replaces `PLACEHOLDER_SIG` |
-| merge + hook | `IbisPaintApplication.attachBaseContext` gets the payload call prepended |
-| install | installs and launches, the payload runs |
-
-Two things are still open, both reported by the payload at runtime:
-
-```
-W Qrylz: Native hook qrylz_hook not loaded
-W Qrylz: java.lang.UnsatisfiedLinkError: dlopen failed: library "libqrylz_hook.so" not found
-W Qrylz: java.lang.NoSuchFieldException: No field mPackageManager in class Landroid/app/ActivityThread;
+```bash
+zipalign -f -p 4 patched.apk aligned.apk
+apksigner sign --ks my.jks --out signed.apk aligned.apk
 ```
 
-The first one is the native hook that is not written yet. The second one is the
-consequence: `ActivityThread.mPackageManager` is a hidden API, so the proxy cannot be
-installed on Android 9 and newer until the native hook lifts that restriction.
-
-
+## Layout
 
 | Path | Contents |
 | --- | --- |
 | `src/main/java/alienkrishn/qrylz/Qrylz.java` | CLI and pipeline |
-| `src/main/java/alienkrishn/qrylz/SignatureExtractor.java` | certificate and `META-INF` extraction |
-| `src/main/java/alienkrishn/qrylz/DexInjector.java` | dexlib2 patching |
-| `payload/` | runtime half, compiled to `payload.dex` with the SDK `d8` |
+| `.../SignatureExtractor.java` | reads the original certificate |
+| `.../ManifestEditor.java` | patches the binary manifest with ARSCLib |
+| `.../ApkOverlapper.java` | writes the apk with the original as its prefix |
+| `.../DexInjector.java` | dexlib2 patching of the payload |
+| `payload/` | the runtime half, compiled to `payload.dex` with the SDK `d8` |
+| `native/` | the native hook, built with the NDK |
+
+## Credits
+
+The mechanism follows the public work on the subject, in particular
+[ApkSignatureKillerEx](https://github.com/L-JINBIN/ApkSignatureKillerEx) and
+[APKKiller](https://github.com/aimardcr/APKKiller).

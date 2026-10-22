@@ -39,12 +39,6 @@ import java.util.zip.ZipOutputStream;
  */
 public final class SignatureExtractor {
 
-    /** Name of the tiny archive that is injected into {@code assets/}. */
-    public static final String ORIGIN_ARCHIVE = "qrylz_origin.zip";
-
-    /** Entry inside the origin archive that carries the raw certificate. */
-    public static final String CERTIFICATE_ENTRY = "qrylz/cert.der";
-
     private static final String META_INF = "META-INF/";
 
     private SignatureExtractor() {
@@ -59,15 +53,13 @@ public final class SignatureExtractor {
         private final String base64;
         private final String sha256;
         private final String certificateEntry;
-        private final Map<String, byte[]> metaInf;
 
         SignatureData(byte[] certificateDer, String base64, String sha256,
-                      String certificateEntry, Map<String, byte[]> metaInf) {
+                      String certificateEntry) {
             this.certificateDer = certificateDer;
             this.base64 = base64;
             this.sha256 = sha256;
             this.certificateEntry = certificateEntry;
-            this.metaInf = Collections.unmodifiableMap(metaInf);
         }
 
         /** @return DER encoded X.509 certificate */
@@ -90,10 +82,6 @@ public final class SignatureExtractor {
             return certificateEntry;
         }
 
-        /** @return the original {@code META-INF} entries, keyed by their archive name */
-        public Map<String, byte[]> getMetaInf() {
-            return metaInf;
-        }
     }
 
     /**
@@ -131,13 +119,11 @@ public final class SignatureExtractor {
                 if (name.indexOf('/', META_INF.length()) >= 0) {
                     continue;
                 }
-                byte[] data;
-                try (InputStream in = zip.getInputStream(entry)) {
-                    data = readAll(in);
-                }
-                metaInf.put(name, data);
                 if (certificateEntry == null && isCertificate(name)) {
                     certificateEntry = name;
+                    try (InputStream in = zip.getInputStream(entry)) {
+                        metaInf.put(name, readAll(in));
+                    }
                 }
             }
         }
@@ -153,7 +139,7 @@ public final class SignatureExtractor {
         String base64 = Base64.getEncoder().encodeToString(der);
         String sha256 = hex(sha256(der));
 
-        return new SignatureData(der, base64, sha256, certificateEntry, metaInf);
+        return new SignatureData(der, base64, sha256, certificateEntry);
     }
 
     /**
@@ -175,58 +161,6 @@ public final class SignatureExtractor {
         }
         throw new IOException("No signing certificate found in " + apk
                 + " (neither a v1 META-INF signature nor a v2/v3 signature block)");
-    }
-
-    /**
-     * Packs the original {@code META-INF} entries into a small zip archive.
-     * <p>
-     * Only a few kilobytes in a normal APK, which is the whole point of the "tiny
-     * origin" trick: the native hook needs the original signature blocks, not a copy of
-     * the whole application.
-     *
-     * @param metaInf the entries as returned by {@link #extract(File)}
-     * @return the archive bytes
-     * @throws IOException when the archive cannot be written
-     */
-    public static byte[] buildOriginArchive(Map<String, byte[]> metaInf) throws IOException {
-        return buildOriginArchive(metaInf, null);
-    }
-
-    /**
-     * Packs the original {@code META-INF} entries and the original certificate into a
-     * small zip archive.
-     * <p>
-     * Only a few kilobytes in a normal APK, which is the whole point of the "tiny
-     * origin" trick: the native hook needs the original signature material, not a copy
-     * of the whole application.
-     *
-     * @param metaInf the entries as returned by {@link #extract(File)}
-     * @param certificateDer the original certificate, may be {@code null}
-     * @return the archive bytes
-     * @throws IOException when the archive cannot be written
-     */
-    public static byte[] buildOriginArchive(Map<String, byte[]> metaInf, byte[] certificateDer)
-            throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try (ZipOutputStream zip = new ZipOutputStream(out)) {
-            for (Map.Entry<String, byte[]> entry : metaInf.entrySet()) {
-                writeEntry(zip, entry.getKey(), entry.getValue());
-            }
-            if (certificateDer != null) {
-                writeEntry(zip, CERTIFICATE_ENTRY, certificateDer);
-            }
-        }
-        return out.toByteArray();
-    }
-
-    private static void writeEntry(ZipOutputStream zip, String name, byte[] data)
-            throws IOException {
-        ZipEntry zipEntry = new ZipEntry(name);
-        // Fixed timestamp so the same input always produces the same archive.
-        zipEntry.setTime(0L);
-        zip.putNextEntry(zipEntry);
-        zip.write(data);
-        zip.closeEntry();
     }
 
     /**

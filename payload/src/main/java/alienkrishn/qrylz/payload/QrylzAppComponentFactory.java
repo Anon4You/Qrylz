@@ -28,7 +28,11 @@ public class QrylzAppComponentFactory extends AppComponentFactory {
     @Override
     public ClassLoader instantiateClassLoader(ClassLoader cl, ApplicationInfo info) {
         if (info != null) {
-            QrylzPayload.installForPackage(info.packageName);
+            String apkPath = QrylzPayload.getApkPath(info.packageName);
+            if (apkPath == null) {
+                apkPath = info.sourceDir;
+            }
+            QrylzPayload.install(info.packageName, apkPath);
         }
         return cl;
     }
@@ -36,7 +40,6 @@ public class QrylzAppComponentFactory extends AppComponentFactory {
     @Override
     public Application instantiateApplication(ClassLoader cl, String className)
             throws InstantiationException, IllegalAccessException, ClassNotFoundException {
-        QrylzPayload.installForPackage(null);
         AppComponentFactory delegate = delegate();
         return delegate != null
                 ? delegate.instantiateApplication(cl, className)
