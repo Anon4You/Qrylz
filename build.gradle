@@ -12,7 +12,7 @@ group = 'alienkrishn.qrylz'
 
 // The version of the tool. This is the only place it is written down, the command line
 // reads it from a resource that is generated from it.
-version = '1.0.2'
+version = '1.0.3'
 
 // Compiled with whatever JDK runs Gradle, but the bytecode stays on Java 17 so the jar
 // runs on older JVMs.
@@ -65,24 +65,32 @@ def cmakeBin = {
     return found ? new File(found.last(), 'bin/cmake') : null
 }
 
-// The native hook is built with the NDK and put into the jar, so that one download
-// is enough to use the tool.
+// The abis the native hook is built for.
+def hookAbis = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86']
+
+// The native hook is built with the NDK, one build directory per abi, and put into the
+// jar, so that one download is enough to use the tool.
 tasks.register('buildNativeHook', Exec) {
     group = 'build'
-    description = 'Builds the native hook with the NDK.'
+    description = 'Builds the native hook for every abi with the NDK.'
     workingDir = projectDir
     doFirst {
         if (ndkDir() == null || cmakeBin() == null) {
             throw new GradleException('The Android NDK and cmake are needed to build the native hook.')
         }
+        def abis = hookAbis.join(' ')
         commandLine 'sh', '-c', """
-            "${cmakeBin().absolutePath}" \
-                -DCMAKE_TOOLCHAIN_FILE="${ndkDir().absolutePath}/build/cmake/android.toolchain.cmake" \
-                -DANDROID_ABI=arm64-v8a \
-                -DANDROID_PLATFORM=android-24 \
-                -DCMAKE_BUILD_TYPE=Release \
-                -B native/build native &&
-            "${cmakeBin().absolutePath}" --build native/build
+            set -e
+            for ABI in ${abis}; do
+                echo "building the native hook for ${'$'}{ABI}"
+                "${cmakeBin().absolutePath}" \
+                    -DCMAKE_TOOLCHAIN_FILE="${ndkDir().absolutePath}/build/cmake/android.toolchain.cmake" \
+                    -DANDROID_ABI="${'$'}{ABI}" \
+                    -DANDROID_PLATFORM=android-24 \
+                    -DCMAKE_BUILD_TYPE=Release \
+                    -B "native/build/${'$'}{ABI}" native
+                "${cmakeBin().absolutePath}" --build "native/build/${'$'}{ABI}"
+            done
         """
     }
 }
@@ -112,9 +120,11 @@ tasks.named('processResources') {
         include 'payload.dex'
     }
     dependsOn 'buildNativeHook'
-    from(layout.projectDirectory.dir('native/build')) {
-        include 'libqrylz_hook.so'
-        rename { "native/arm64-v8a/${it}" }
+    hookAbis.each { abi ->
+        from(layout.projectDirectory.dir("native/build/${abi}")) {
+            include 'libqrylz_hook.so'
+            rename { "native/${abi}/libqrylz_hook.so" }
+        }
     }
 }
 

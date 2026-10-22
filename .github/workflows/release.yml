@@ -94,7 +94,6 @@ jobs:
           set -e
           mkdir -p dist
           cp build/libs/qrylz.jar dist/qrylz.jar
-          cp native/build/libqrylz_hook.so dist/libqrylz_hook.so
           (cd dist && sha256sum * > SHA256SUMS)
 
       - name: Publish the release
@@ -105,5 +104,4 @@ jobs:
           generate_release_notes: true
           files: |
             dist/qrylz.jar
-            dist/libqrylz_hook.so
             dist/SHA256SUMS

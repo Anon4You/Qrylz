@@ -61,10 +61,9 @@ public final class Qrylz implements Callable<Integer> {
      * <p>
      * The hook may only go into a directory the apk already has. Adding a directory for
      * an abi the apk does not support would make the package manager refuse to install
-     * it on a device of that abi, and the hook is written for one instruction set only,
-     * so it would corrupt the plt of the others.
+     * it on a device of that abi.
      */
-    private static final String[] HOOK_ABIS = {"arm64-v8a"};
+    private static final String[] HOOK_ABIS = {"arm64-v8a", "armeabi-v7a", "x86_64", "x86"};
 
     @Option(names = {"-i", "--input"}, required = true, paramLabel = "<apk>",
             description = "Input APK or split APK set (.apk, .apks, .xapk, .apkm)")
@@ -88,14 +87,22 @@ public final class Qrylz implements Callable<Integer> {
         File apk = resolveInput();
         log("input: " + apk);
 
-        // The native hook may only go into a directory the apk already has, and the
-        // hook is written for one instruction set, so the abi is resolved up front.
-        String hookAbi = hookAbi(apk);
-        if (hookAbi == null) {
-            log("native hook: the apk has no " + String.join(" or ", HOOK_ABIS)
-                    + " libraries, only the java level bypass is applied");
+        // The native hook may only go into a directory the apk already has, and every
+        // abi of the apk needs the build of its own instruction set.
+        List<String> abis = abis(apk);
+        List<String> hooked = new ArrayList<>();
+        for (String abi : abis) {
+            if (hasHook(abi)) {
+                hooked.add(abi);
+            } else {
+                log("native hook: no build for " + abi);
+            }
+        }
+        if (hooked.isEmpty()) {
+            log("native hook: the apk has no library of a known abi, only the java level"
+                    + " bypass is applied");
         } else {
-            log("native hook: lib/" + hookAbi + "/lib" + NATIVE_HOOK + ".so");
+            log("native hook: " + String.join(", ", hooked));
         }
 
         SignatureExtractor.SignatureData signature = SignatureExtractor.extract(apk);
@@ -124,10 +131,9 @@ public final class Qrylz implements Callable<Integer> {
         List<ApkOverlapper.NewEntry> entries = new ArrayList<>();
         entries.add(new ApkOverlapper.NewEntry("AndroidManifest.xml", manifest.getManifest()));
         entries.add(new ApkOverlapper.NewEntry(dexName, toBytes(payloadDex)));
-        if (hookAbi != null) {
-            byte[] hook = readNativeHook();
+        for (String abi : hooked) {
             entries.add(new ApkOverlapper.NewEntry(
-                    "lib/" + hookAbi + "/lib" + NATIVE_HOOK + ".so", hook));
+                    "lib/" + abi + "/lib" + NATIVE_HOOK + ".so", readNativeHook(abi)));
         }
 
         File target = output != null ? output : defaultOutput(input);
@@ -217,10 +223,9 @@ public final class Qrylz implements Callable<Integer> {
     }
 
     /**
-     * @return the abi the native hook can be injected into, {@code null} when the apk has
-     *         none of them
+     * @return the abis the apk carries native libraries for
      */
-    private static String hookAbi(File apk) throws IOException {
+    private static List<String> abis(File apk) throws IOException {
         List<String> present = new ArrayList<>();
         try (ZipFile zip = new ZipFile(apk)) {
             for (Enumeration<? extends ZipEntry> it = zip.entries(); it.hasMoreElements(); ) {
@@ -230,29 +235,40 @@ public final class Qrylz implements Callable<Integer> {
                 }
                 int slash = name.indexOf('/', 4);
                 if (slash > 4) {
-                    present.add(name.substring(4, slash));
+                    String abi = name.substring(4, slash);
+                    if (!present.contains(abi)) {
+                        present.add(abi);
+                    }
                 }
             }
         }
-        for (String candidate : HOOK_ABIS) {
-            if (present.contains(candidate)) {
-                return candidate;
-            }
-        }
-        return null;
+        return present;
     }
 
     /**
-     * @return the native hook, either the one given on the command line or the bundled one
+     * @return true when a build of the native hook exists for the abi
      */
-    private byte[] readNativeHook() throws IOException {
+    private boolean hasHook(String abi) {
+        if (nativeHook != null) {
+            // A hook given on the command line is used for every abi.
+            return true;
+        }
+        return Qrylz.class.getClassLoader()
+                .getResource("native/" + abi + "/lib" + NATIVE_HOOK + ".so") != null;
+    }
+
+    /**
+     * @return the native hook for an abi, either the one given on the command line or the
+     *         bundled one
+     */
+    private byte[] readNativeHook(String abi) throws IOException {
         if (nativeHook != null) {
             return Files.readAllBytes(nativeHook.toPath());
         }
         try (InputStream in = Qrylz.class.getClassLoader()
-                .getResourceAsStream("native/arm64-v8a/lib" + NATIVE_HOOK + ".so")) {
+                .getResourceAsStream("native/" + abi + "/lib" + NATIVE_HOOK + ".so")) {
             if (in == null) {
-                throw new IOException("No native hook bundled and no --lib given");
+                throw new IOException("No native hook bundled for " + abi);
             }
             return in.readAllBytes();
         }
