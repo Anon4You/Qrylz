@@ -43,7 +43,7 @@ import java.util.zip.ZipFile;
 @Command(
         name = "qrylz",
         mixinStandardHelpOptions = true,
-        version = "qrylz 1.0.0",
+        versionProvider = Qrylz.Version.class,
         sortOptions = false,
         description = "Patches an APK so signature verification keeps working after re-signing."
 )
@@ -60,8 +60,8 @@ public final class Qrylz implements Callable<Integer> {
             description = "Input APK or split APK set (.apk, .apks, .xapk, .apkm)")
     private File input;
 
-    @Option(names = {"-o", "--output"}, required = true, paramLabel = "<apk>",
-            description = "Output APK (not signed)")
+    @Option(names = {"-o", "--output"}, paramLabel = "<apk>",
+            description = "Output APK (not signed). Defaults to <input>_qrylz.apk next to the input.")
     private File output;
 
     @Option(names = {"--payload"}, paramLabel = "<dex>",
@@ -82,7 +82,7 @@ public final class Qrylz implements Callable<Integer> {
 
         SignatureExtractor.SignatureData signature = SignatureExtractor.extract(apk);
         log("certificate: " + signature.getCertificateEntry()
-                + "  sha256=" + signature.getSha256());
+                + "  sha256=" + Ansi.green(signature.getSha256()));
 
         // The original apk becomes the prefix of the new one.
         long originSize = apk.length();
@@ -90,7 +90,7 @@ public final class Qrylz implements Callable<Integer> {
         // The manifest points at the payload factory, the application class stays as it is.
         ManifestEditor.Result manifest = ManifestEditor.setAppComponentFactory(
                 apk, APP_COMPONENT_FACTORY);
-        log("manifest: appComponentFactory -> " + APP_COMPONENT_FACTORY
+        log("manifest: appComponentFactory -> " + Ansi.yellow(APP_COMPONENT_FACTORY)
                 + (manifest.getPreviousFactory().isEmpty()
                 ? "" : " (was " + manifest.getPreviousFactory() + ")"));
 
@@ -109,18 +109,33 @@ public final class Qrylz implements Callable<Integer> {
         byte[] hook = readNativeHook();
         entries.add(new ApkOverlapper.NewEntry(
                 "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so", hook));
-        log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so (" + hook.length + " bytes)");
+        log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so"
+                + " (" + hook.length + " bytes)");
 
-        File parent = output.getAbsoluteFile().getParentFile();
+        File target = output != null ? output : defaultOutput(input);
+        File parent = target.getAbsoluteFile().getParentFile();
         if (parent != null) {
             Files.createDirectories(parent.toPath());
         }
-        long written = ApkOverlapper.write(apk, output, entries);
-        log("written: " + output.getAbsolutePath() + " (" + output.length() + " bytes, origin "
-                + written + " bytes)");
+        long written = ApkOverlapper.write(apk, target, entries);
+        log("written: " + Ansi.green(target.getAbsolutePath())
+                + " (" + target.length() + " bytes, origin " + written + " bytes)");
 
         log("done - sign the output APK with your own key before installing it");
         return 0;
+    }
+
+    /**
+     * @return the file the patched apk is written to when no output was given
+     */
+    private static File defaultOutput(File input) {
+        String name = input.getName();
+        int dot = name.lastIndexOf('.');
+        if (dot > 0) {
+            name = name.substring(0, dot);
+        }
+        File parent = input.getAbsoluteFile().getParentFile();
+        return new File(parent, name + "_qrylz.apk");
     }
 
     /**
@@ -274,21 +289,58 @@ public final class Qrylz implements Callable<Integer> {
         }
     }
 
+    private static final String[] LOGO = {
+            " ███  ████  █   █ █     █   █ █████",
+            "█   █ █   █  █ █  █      █ █     █",
+            "█ █ █ ████    █   █       █     █",
+            "█  █  █  █    █   █       █    █",
+            " ██ █ █   █   █   █████   █   █████",
+    };
+
+    /** What is printed on the right side of the logo. */
+    private static final String[][] SIDEBAR = {
+            {Ansi.dim("1.0.0"), " ", Ansi.cyan("signature verification test harness")},
+            {Ansi.yellow("Alienkrishn"), " ", Ansi.dim("[Anon4You]")},
+            {Ansi.dim("github.com/Anon4You/Qrylz")},
+    };
+
     private static void printBanner() {
         System.out.println();
-        System.out.println("============================================================");
-        System.out.println(" Qrylz 1.0.0 - signature verification test harness");
+        for (int i = 0; i < LOGO.length; i++) {
+            StringBuilder line = new StringBuilder(Ansi.cyan(LOGO[i]));
+            if (i < SIDEBAR.length) {
+                line.append("  ");
+                for (String part : SIDEBAR[i]) {
+                    line.append(part);
+                }
+            }
+            System.out.println(line);
+        }
         System.out.println();
-        System.out.println(" This tool is meant for APKs you own or are authorised to");
-        System.out.println(" test. It bypasses signature verification so that a re-signed");
-        System.out.println(" build keeps working. Running it against third party apps");
-        System.out.println(" breaks their licence checks and is not the intended use.");
-        System.out.println("============================================================");
+        System.out.println(" " + Ansi.yellow("This tool is meant for APKs you own or are authorised to"));
+        System.out.println(" " + Ansi.yellow("test. It bypasses signature verification so that a re-signed"));
+        System.out.println(" " + Ansi.yellow("build keeps working. Running it against third party apps"));
+        System.out.println(" " + Ansi.yellow("breaks their licence checks and is not the intended use."));
         System.out.println();
     }
 
     private static void log(String message) {
-        System.out.println("[qrylz] " + message);
+        System.out.println(Ansi.cyan("[qrylz]") + " " + message);
+    }
+
+    /**
+     * The version banner of the tool.
+     */
+    static final class Version implements CommandLine.IVersionProvider {
+        @Override
+        public String[] getVersion() {
+            return new String[]{
+                    "qrylz 1.0.0",
+                    "signature verification test harness",
+                    "Alienkrishn [Anon4You]",
+                    "https://github.com/Anon4You/Qrylz",
+            };
+        }
     }
 
     public static void main(String[] args) {
