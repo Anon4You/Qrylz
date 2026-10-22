@@ -38,12 +38,63 @@ tasks.withType(JavaCompile).configureEach {
     options.release = 17
 }
 
+// The SDK and the NDK, the same way the payload project finds them.
+def sdkDir = {
+    def props = rootProject.file('local.properties')
+    if (props.exists()) {
+        def line = props.withReader { r -> r.readLines().find { it.startsWith('sdk.dir=') } }
+        if (line != null) {
+            return line.substring('sdk.dir='.length()).trim()
+        }
+    }
+    return System.getenv('ANDROID_HOME') ?: System.getenv('ANDROID_SDK_ROOT')
+}
+
+def ndkDir = {
+    def dir = new File(sdkDir() ?: '', 'ndk')
+    def found = dir.listFiles()?.findAll { it.isDirectory() }?.sort { it.name }
+    return found ? found.last() : null
+}
+
+def cmakeBin = {
+    def dir = new File(sdkDir() ?: '', 'cmake')
+    def found = dir.listFiles()?.findAll { it.isDirectory() }?.sort { it.name }
+    return found ? new File(found.last(), 'bin/cmake') : null
+}
+
+// The native hook is built with the NDK and put into the jar, so that one download
+// is enough to use the tool.
+tasks.register('buildNativeHook', Exec) {
+    group = 'build'
+    description = 'Builds the native hook with the NDK.'
+    workingDir = projectDir
+    doFirst {
+        if (ndkDir() == null || cmakeBin() == null) {
+            throw new GradleException('The Android NDK and cmake are needed to build the native hook.')
+        }
+        commandLine 'sh', '-c', """
+            "${cmakeBin().absolutePath}" \
+                -DCMAKE_TOOLCHAIN_FILE="${ndkDir().absolutePath}/build/cmake/android.toolchain.cmake" \
+                -DANDROID_ABI=arm64-v8a \
+                -DANDROID_PLATFORM=android-24 \
+                -DCMAKE_BUILD_TYPE=Release \
+                -B native/build native &&
+            "${cmakeBin().absolutePath}" --build native/build
+        """
+    }
+}
+
 // payload.dex is produced by :payload:buildDex (SDK d8) and packaged as a resource
-// so the CLI can find it on its own classpath.
+// so the CLI can find it on its own classpath. The native hook goes in the same way.
 tasks.named('processResources') {
     dependsOn ':payload:buildDex'
     from(layout.projectDirectory.dir('payload/build/dex')) {
         include 'payload.dex'
+    }
+    dependsOn 'buildNativeHook'
+    from(layout.projectDirectory.dir('native/build')) {
+        include 'libqrylz_hook.so'
+        rename { "native/arm64-v8a/${it}" }
     }
 }
 

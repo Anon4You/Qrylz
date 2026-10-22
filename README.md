@@ -51,8 +51,10 @@ that were added and by one more central directory.
 ## Usage
 
 ```bash
-java -jar qrylz.jar -i app.apk -o patched.apk --lib libqrylz_hook.so
+java -jar qrylz.jar -i app.apk -o patched.apk
 ```
+
+The jar is self contained, the native hook is bundled in it.
 
 ```
 Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
@@ -60,7 +62,8 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -i, --input=<apk>    Input APK or split APK set (.apk, .apks, .xapk, .apkm)
   -o, --output=<apk>   Output APK (not signed)
       --payload=<dex>  Payload dex to inject. Defaults to the bundled payload.dex.
-      --lib=<so>       Native hook to inject as lib/arm64-v8a/libqrylz_hook.so
+      --lib=<so>       Native hook to inject as lib/arm64-v8a/libqrylz_hook.so.
+                       Defaults to the one bundled in this jar.
   -h, --help           Show this help message and exit.
   -V, --version        Print version information and exit.
 ```
@@ -86,7 +89,8 @@ aligned on their own.
 ./gradlew shadowJar
 ```
 
-The fat jar lands in `build/libs/qrylz.jar` and is about 2.4 MB.
+The fat jar lands in `build/libs/qrylz.jar` and is about 2.5 MB. It contains the payload
+dex and the native hook, so one download is enough.
 
 Two things are needed besides a JDK 17:
 
@@ -98,16 +102,8 @@ Two things are needed besides a JDK 17:
 sdk.dir=/path/to/android-sdk
 ```
 
-The native hook is built separately:
-
-```bash
-cmake -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
-      -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-24 \
-      -DCMAKE_BUILD_TYPE=Release -B native/build native
-cmake --build native/build
-```
-
-Prebuilt binaries for both are attached to every release.
+The native hook is built by the build itself, `./gradlew buildNativeHook` does it on its
+own. Prebuilt binaries are attached to every release.
 
 ---
 
