@@ -75,8 +75,6 @@ public final class Qrylz implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
-        printBanner();
-
         File apk = resolveInput();
         log("input: " + apk);
 
@@ -344,6 +342,9 @@ public final class Qrylz implements Callable<Integer> {
     }
 
     public static void main(String[] args) {
+        // The banner is printed before the command line is parsed, so that it shows up
+        // for every invocation, including --help and --version.
+        printBanner();
         System.exit(new CommandLine(new Qrylz()).execute(args));
     }
 }
