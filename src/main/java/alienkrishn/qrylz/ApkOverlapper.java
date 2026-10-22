@@ -201,6 +201,14 @@ public final class ApkOverlapper {
 
     private static void writeLocalHeader(ByteArrayOutputStream out, NewEntry entry, CRC32 crc) {
         byte[] name = entry.name.getBytes(StandardCharsets.UTF_8);
+        // The data of the entry has to start on the alignment the platform wants:
+        // a native library is mapped straight out of the apk, so it needs a page,
+        // everything else only four bytes.
+        int alignment = entry.name.endsWith(".so") ? 4096 : 4;
+        int headerSize = LOCAL_HEADER_SIZE + name.length;
+        int padding = (alignment - ((int) (out.size() + headerSize) % alignment)) % alignment;
+        byte[] extra = padding > 0 ? padding(padding) : new byte[0];
+
         writeInt(out, 0x04034b50);
         writeShort(out, 20);
         writeShort(out, 0);
@@ -211,9 +219,26 @@ public final class ApkOverlapper {
         writeInt(out, entry.data.length);
         writeInt(out, entry.data.length);
         writeShort(out, name.length);
-        writeShort(out, 0);
+        writeShort(out, extra.length);
         out.write(name, 0, name.length);
+        out.write(extra, 0, extra.length);
         out.write(entry.data, 0, entry.data.length);
+    }
+
+    /**
+     * Builds the extra field that pads the entry to its alignment.
+     * <p>
+     * The header id is the one the platform tools use for the alignment padding.
+     */
+    private static byte[] padding(int size) {
+        byte[] extra = new byte[size];
+        if (size >= 4) {
+            extra[0] = (byte) 0x35;
+            extra[1] = (byte) 0xd9;
+            extra[2] = (byte) ((size - 4) & 0xFF);
+            extra[3] = (byte) (((size - 4) >> 8) & 0xFF);
+        }
+        return extra;
     }
 
     private static void writeCentralHeader(ByteArrayOutputStream out, String name, int size,

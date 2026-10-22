@@ -51,9 +51,12 @@ fails.
 ## Build
 
 ```bash
-./gradlew shadowJar          # -> build/libs/qrylz.jar
+./gradlew shadowJar          # -> build/libs/qrylz.jar  (about 2.4 MB)
 ./gradlew run --args="-i app.apk -o patched.apk --lib native/build/libqrylz_hook.so"
 ```
+
+The fat jar is shrunk with proguard, the framework apks that ARSCLib ships as
+resources are dropped.
 
 Needs a JDK 17 and the Android SDK for `d8`, which builds the payload dex. The native
 hook is built with the NDK:
@@ -84,12 +87,16 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -V, --version        Print version information and exit.
 ```
 
-The output is **not signed**. Sign it with your own key afterwards:
+The output is **not signed**, so that the jar does not have to carry a signing
+library. Sign it with your own key afterwards:
 
 ```bash
-zipalign -f -p 4 patched.apk aligned.apk
-apksigner sign --ks my.jks --out signed.apk aligned.apk
+apksigner sign --ks my.jks --out signed.apk patched.apk
 ```
+
+Do not run `zipalign` over the output. It cannot relocate the apk signature
+block, and the block is what the payload serves to the application. The entries
+Qrylz adds are aligned on their own.
 
 ## Layout
 
@@ -102,9 +109,3 @@ apksigner sign --ks my.jks --out signed.apk aligned.apk
 | `.../DexInjector.java` | dexlib2 patching of the payload |
 | `payload/` | the runtime half, compiled to `payload.dex` with the SDK `d8` |
 | `native/` | the native hook, built with the NDK |
-
-## Credits
-
-The mechanism follows the public work on the subject, in particular
-[ApkSignatureKillerEx](https://github.com/L-JINBIN/ApkSignatureKillerEx) and
-[APKKiller](https://github.com/aimardcr/APKKiller).

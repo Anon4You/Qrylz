@@ -61,11 +61,12 @@ shadowJar {
     // DEX tooling and the CLI both look up implementations through the service loader.
     mergeServiceFiles()
 
-    // Shrink the fat jar. ARSCLib reaches some of its framework/resource helpers
-    // reflectively, so its whole tree has to survive the shrinker.
-    minimize {
-        exclude(dependency('com.github.REAndroid:ARSCLib:.*'))
-    }
+    // ARSCLib ships the android framework apks as resources. They are only needed to
+    // resolve framework resources, which is not what this tool does.
+    exclude 'frameworks/android/**' 
+
+    // Shrink the fat jar down to what is actually used.
+    minimize()
 
     manifest {
         attributes 'Main-Class': 'alienkrishn.qrylz.Qrylz'
