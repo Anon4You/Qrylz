@@ -164,6 +164,23 @@ actual instantiation, so an application that relies on its own factory keeps wor
 
 ---
 
+## Architectures
+
+The tool itself is a plain java program, the jar runs on any jvm.
+
+The **native hook** is a different story. It patches the plt of the loaded modules and
+decodes the aarch64 instructions of the stubs, so it only works on `arm64-v8a`. The hook
+is therefore only injected into a `lib/` directory the apk already has - adding a
+directory for an abi the apk does not support would make the package manager refuse to
+install it on a device of that abi.
+
+An apk that carries `arm64-v8a` and `armeabi-v7a` libraries gets the hook in the
+`arm64-v8a` directory. On a 32 bit device the library is not found, the payload catches
+the error and the application keeps running - but the native level bypass does not apply
+there, only the java level one.
+
+---
+
 ## Third party libraries
 
 | Library | Project | License | Used for |

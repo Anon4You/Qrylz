@@ -56,6 +56,16 @@ public final class Qrylz implements Callable<Integer> {
     /** Native hook that redirects the opens of the apk. */
     private static final String NATIVE_HOOK = "qrylz_hook";
 
+    /**
+     * The abis the native hook is built for.
+     * <p>
+     * The hook may only go into a directory the apk already has. Adding a directory for
+     * an abi the apk does not support would make the package manager refuse to install
+     * it on a device of that abi, and the hook is written for one instruction set only,
+     * so it would corrupt the plt of the others.
+     */
+    private static final String[] HOOK_ABIS = {"arm64-v8a"};
+
     @Option(names = {"-i", "--input"}, required = true, paramLabel = "<apk>",
             description = "Input APK or split APK set (.apk, .apks, .xapk, .apkm)")
     private File input;
@@ -69,7 +79,7 @@ public final class Qrylz implements Callable<Integer> {
     private File payload;
 
     @Option(names = {"--lib"}, paramLabel = "<so>",
-            description = "Native hook to inject as lib/arm64-v8a/lib" + NATIVE_HOOK
+            description = "Native hook to inject as lib/<abi>/lib" + NATIVE_HOOK
                     + ".so. Defaults to the one bundled in this jar.")
     private File nativeHook;
 
@@ -77,6 +87,16 @@ public final class Qrylz implements Callable<Integer> {
     public Integer call() throws Exception {
         File apk = resolveInput();
         log("input: " + apk);
+
+        // The native hook may only go into a directory the apk already has, and the
+        // hook is written for one instruction set, so the abi is resolved up front.
+        String hookAbi = hookAbi(apk);
+        if (hookAbi == null) {
+            log("native hook: the apk has no " + String.join(" or ", HOOK_ABIS)
+                    + " libraries, only the java level bypass is applied");
+        } else {
+            log("native hook: lib/" + hookAbi + "/lib" + NATIVE_HOOK + ".so");
+        }
 
         SignatureExtractor.SignatureData signature = SignatureExtractor.extract(apk);
         log("certificate: " + signature.getCertificateEntry()
@@ -104,11 +124,11 @@ public final class Qrylz implements Callable<Integer> {
         List<ApkOverlapper.NewEntry> entries = new ArrayList<>();
         entries.add(new ApkOverlapper.NewEntry("AndroidManifest.xml", manifest.getManifest()));
         entries.add(new ApkOverlapper.NewEntry(dexName, toBytes(payloadDex)));
-        byte[] hook = readNativeHook();
-        entries.add(new ApkOverlapper.NewEntry(
-                "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so", hook));
-        log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so"
-                + " (" + hook.length + " bytes)");
+        if (hookAbi != null) {
+            byte[] hook = readNativeHook();
+            entries.add(new ApkOverlapper.NewEntry(
+                    "lib/" + hookAbi + "/lib" + NATIVE_HOOK + ".so", hook));
+        }
 
         File target = output != null ? output : defaultOutput(input);
         File parent = target.getAbsoluteFile().getParentFile();
@@ -194,6 +214,32 @@ public final class Qrylz implements Callable<Integer> {
         log("merged " + directory.getName() + " -> " + merged.getName()
                 + " (" + merged.length() + " bytes)");
         return merged;
+    }
+
+    /**
+     * @return the abi the native hook can be injected into, {@code null} when the apk has
+     *         none of them
+     */
+    private static String hookAbi(File apk) throws IOException {
+        List<String> present = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            for (Enumeration<? extends ZipEntry> it = zip.entries(); it.hasMoreElements(); ) {
+                String name = it.nextElement().getName();
+                if (!name.startsWith("lib/")) {
+                    continue;
+                }
+                int slash = name.indexOf('/', 4);
+                if (slash > 4) {
+                    present.add(name.substring(4, slash));
+                }
+            }
+        }
+        for (String candidate : HOOK_ABIS) {
+            if (present.contains(candidate)) {
+                return candidate;
+            }
+        }
+        return null;
     }
 
     /**
