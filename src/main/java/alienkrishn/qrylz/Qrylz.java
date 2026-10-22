@@ -69,7 +69,8 @@ public final class Qrylz implements Callable<Integer> {
     private File payload;
 
     @Option(names = {"--lib"}, paramLabel = "<so>",
-            description = "Native hook to inject as lib/arm64-v8a/lib" + NATIVE_HOOK + ".so")
+            description = "Native hook to inject as lib/arm64-v8a/lib" + NATIVE_HOOK
+                    + ".so. Defaults to the one bundled in this jar.")
     private File nativeHook;
 
     @Override
@@ -105,12 +106,10 @@ public final class Qrylz implements Callable<Integer> {
         List<ApkOverlapper.NewEntry> entries = new ArrayList<>();
         entries.add(new ApkOverlapper.NewEntry("AndroidManifest.xml", manifest.getManifest()));
         entries.add(new ApkOverlapper.NewEntry(dexName, toBytes(payloadDex)));
-        if (nativeHook != null) {
-            entries.add(new ApkOverlapper.NewEntry(
-                    "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so",
-                    Files.readAllBytes(nativeHook.toPath())));
-            log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so");
-        }
+        byte[] hook = readNativeHook();
+        entries.add(new ApkOverlapper.NewEntry(
+                "lib/arm64-v8a/lib" + NATIVE_HOOK + ".so", hook));
+        log("native hook: lib/arm64-v8a/lib" + NATIVE_HOOK + ".so (" + hook.length + " bytes)");
 
         File parent = output.getAbsoluteFile().getParentFile();
         if (parent != null) {
@@ -164,6 +163,22 @@ public final class Qrylz implements Callable<Integer> {
         log("merged " + directory.getName() + " -> " + merged.getName()
                 + " (" + merged.length() + " bytes)");
         return merged;
+    }
+
+    /**
+     * @return the native hook, either the one given on the command line or the bundled one
+     */
+    private byte[] readNativeHook() throws IOException {
+        if (nativeHook != null) {
+            return Files.readAllBytes(nativeHook.toPath());
+        }
+        try (InputStream in = Qrylz.class.getClassLoader()
+                .getResourceAsStream("native/arm64-v8a/lib" + NATIVE_HOOK + ".so")) {
+            if (in == null) {
+                throw new IOException("No native hook bundled and no --lib given");
+            }
+            return in.readAllBytes();
+        }
     }
 
     /**
