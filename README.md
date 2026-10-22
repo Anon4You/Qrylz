@@ -16,6 +16,14 @@ certificate, injects a small payload and writes the patched apk out. The result 
  patched.apk   74.4 MB   (+617 KB)
 ```
 
+## Installation
+
+From the [TermuxVoid repository](https://termuxvoid.github.io):
+
+```bash
+pkg install qrylz
+```
+
 ---
 
 ## What it does
