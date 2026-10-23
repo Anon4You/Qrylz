@@ -34,6 +34,8 @@ dependencies {
     implementation 'com.github.REAndroid:ARSCLib:V1.4.0'
     // DEX reading/writing/patching.
     implementation 'com.android.tools.smali:smali-dexlib2:3.0.10'
+
+    testImplementation project(':payload')
 }
 
 tasks.withType(JavaCompile).configureEach {
@@ -159,4 +161,20 @@ tasks.named('run') {
     if (project.hasProperty('runArgs')) {
         args project.property('runArgs').toString().split('\\s+')
     }
+}
+
+tasks.named('test') {
+    failOnNoDiscoveredTests = false
+}
+
+tasks.register('selfTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs the template round-trip and apk path checks.'
+    dependsOn tasks.named('testClasses')
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'alienkrishn.qrylz.payload.QrylzSelfTest'
+}
+
+tasks.named('check') {
+    dependsOn 'selfTest'
 }

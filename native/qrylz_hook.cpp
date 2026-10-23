@@ -343,7 +343,14 @@ Java_alienkrishn_qrylz_payload_QrylzNative_nativeInit(JNIEnv *env, jclass clazz,
         return;
     }
     const char *apk = env->GetStringUTFChars(apk_path, NULL);
+    if (apk == NULL) {
+        return;
+    }
     const char *origin = env->GetStringUTFChars(origin_path, NULL);
+    if (origin == NULL) {
+        env->ReleaseStringUTFChars(apk_path, apk);
+        return;
+    }
     snprintf(g_apk_path, sizeof(g_apk_path), "%s", apk);
     snprintf(g_origin_path, sizeof(g_origin_path), "%s", origin);
     env->ReleaseStringUTFChars(apk_path, apk);

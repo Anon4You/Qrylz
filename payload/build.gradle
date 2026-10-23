@@ -2,6 +2,11 @@ plugins {
     id 'java'
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 // The payload runs inside the target app, so it is compiled against android.jar and
 // turned into a dex with the SDK's d8. It is deliberately a plain java project:
 // the CLI jar must not pull in the Android build tools.

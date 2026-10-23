@@ -335,41 +335,13 @@ public final class QrylzPayload {
             while ((line = reader.readLine()) != null) {
                 String[] parts = line.split("\\s+");
                 String path = parts[parts.length - 1];
-                if (isApkPath(packageName, path)) {
+                if (ApkPathMatcher.matches(packageName, path)) {
                     return path;
                 }
             }
         } catch (Throwable ignored) {
         }
         return null;
-    }
-
-    private static boolean isApkPath(String packageName, String path) {
-        if (!path.startsWith("/") || !path.endsWith(".apk")) {
-            return false;
-        }
-        String[] parts = path.substring(1).split("/", 6);
-        int count = parts.length;
-        if (count == 4 || count == 5) {
-            if (parts[0].equals("data") && parts[1].equals("app")
-                    && parts[count - 1].equals("base.apk")) {
-                return parts[count - 2].startsWith(packageName);
-            }
-            if (parts[0].equals("mnt") && parts[1].equals("asec")
-                    && parts[count - 1].equals("pkg.apk")) {
-                return parts[count - 2].startsWith(packageName);
-            }
-        } else if (count == 3) {
-            if (parts[0].equals("data") && parts[1].equals("app")) {
-                return parts[2].startsWith(packageName);
-            }
-        } else if (count == 6) {
-            if (parts[0].equals("mnt") && parts[1].equals("expand") && parts[3].equals("app")
-                    && parts[5].equals("base.apk")) {
-                return parts[4].endsWith(packageName);
-            }
-        }
-        return false;
     }
 
     // ------------------------------------------------------------------ helpers
