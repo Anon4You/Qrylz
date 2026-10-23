@@ -12,7 +12,7 @@ group = 'alienkrishn.qrylz'
 
 // The version of the tool. This is the only place it is written down, the command line
 // reads it from a resource that is generated from it.
-version = '1.0.3'
+version = '1.0.4'
 
 // Compiled with whatever JDK runs Gradle, but the bytecode stays on Java 17 so the jar
 // runs on older JVMs.
