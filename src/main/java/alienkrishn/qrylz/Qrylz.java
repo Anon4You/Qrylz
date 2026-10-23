@@ -388,19 +388,18 @@ public final class Qrylz implements Callable<Integer> {
     /** The version of the build, read from the resource the build generates. */
     private static final String VERSION = readVersion();
 
-    private static final String[][] SIDEBAR = {
-            {Ansi.dim(VERSION)},
-            {Ansi.yellow(Identity.AUTHOR), " ", Ansi.dim("[" + Identity.HANDLE + "]")},
-            {Ansi.dim(Identity.REPO)},
-    };
-
     private static void printBanner() {
+        String[][] sidebar = {
+                {Ansi.dim(VERSION)},
+                {Ansi.yellow(Identity.author()), " ", Ansi.dim("[" + Identity.handle() + "]")},
+                {Ansi.dim(Identity.repo())},
+        };
         System.out.println();
         for (int i = 0; i < LOGO.length; i++) {
             StringBuilder line = new StringBuilder(Ansi.cyan(LOGO[i]));
-            if (i < SIDEBAR.length) {
+            if (i < sidebar.length) {
                 line.append("  ");
-                for (String part : SIDEBAR[i]) {
+                for (String part : sidebar[i]) {
                     line.append(part);
                 }
             }
@@ -425,8 +424,8 @@ public final class Qrylz implements Callable<Integer> {
             return new String[]{
                     "qrylz " + VERSION,
                     "signature verification test harness",
-                    Identity.AUTHOR + " [" + Identity.HANDLE + "]",
-                    "https://" + Identity.REPO,
+                    Identity.author() + " [" + Identity.handle() + "]",
+                    "https://" + Identity.repo(),
             };
         }
     }
