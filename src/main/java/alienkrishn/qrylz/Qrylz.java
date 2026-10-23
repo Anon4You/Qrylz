@@ -14,6 +14,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Enumeration;
 import java.util.LinkedHashMap;
@@ -84,6 +85,14 @@ public final class Qrylz implements Callable<Integer> {
 
     @Override
     public Integer call() throws Exception {
+        if (!Identity.valid()) {
+            System.err.println("qrylz: this build has been modified, refusing to run");
+            return 1;
+        }
+        if (!input.exists()) {
+            System.err.println("qrylz: input does not exist: " + input.getAbsolutePath());
+            return 2;
+        }
         File apk = resolveInput();
         log("input: " + apk);
 
@@ -345,22 +354,23 @@ public final class Qrylz implements Callable<Integer> {
     }
 
     private static void unzip(File archive, File target) throws IOException {
+        Path root = target.toPath().toAbsolutePath().normalize();
         try (ZipFile zip = new ZipFile(archive)) {
             Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                File destination = new File(target, entry.getName());
-                if (!destination.getCanonicalPath().startsWith(target.getCanonicalPath())) {
+                Path destination = root.resolve(entry.getName()).normalize();
+                if (!destination.startsWith(root)) {
                     throw new IOException("Refusing to extract outside the target directory: "
                             + entry.getName());
                 }
                 if (entry.isDirectory()) {
-                    Files.createDirectories(destination.toPath());
+                    Files.createDirectories(destination);
                     continue;
                 }
-                Files.createDirectories(destination.toPath().getParent());
+                Files.createDirectories(destination.getParent());
                 try (InputStream in = zip.getInputStream(entry);
-                     OutputStream out = Files.newOutputStream(destination.toPath())) {
+                     OutputStream out = Files.newOutputStream(destination)) {
                     in.transferTo(out);
                 }
             }
@@ -378,11 +388,10 @@ public final class Qrylz implements Callable<Integer> {
     /** The version of the build, read from the resource the build generates. */
     private static final String VERSION = readVersion();
 
-    /** What is printed on the right side of the logo. */
     private static final String[][] SIDEBAR = {
-            {Ansi.dim(VERSION), " ", Ansi.cyan("signature verification test harness")},
-            {Ansi.yellow("Alienkrishn"), " ", Ansi.dim("[Anon4You]")},
-            {Ansi.dim("github.com/Anon4You/Qrylz")},
+            {Ansi.dim(VERSION)},
+            {Ansi.yellow(Identity.AUTHOR), " ", Ansi.dim("[" + Identity.HANDLE + "]")},
+            {Ansi.dim(Identity.REPO)},
     };
 
     private static void printBanner() {
@@ -398,10 +407,8 @@ public final class Qrylz implements Callable<Integer> {
             System.out.println(line);
         }
         System.out.println();
-        System.out.println(" " + Ansi.yellow("This tool is meant for APKs you own or are authorised to"));
-        System.out.println(" " + Ansi.yellow("test. It bypasses signature verification so that a re-signed"));
-        System.out.println(" " + Ansi.yellow("build keeps working. Running it against third party apps"));
-        System.out.println(" " + Ansi.yellow("breaks their licence checks and is not the intended use."));
+        System.out.println(" " + Ansi.cyan("signature verification test harness"));
+        System.out.println(" " + Ansi.dim("For APKs you own or are authorised to test."));
         System.out.println();
     }
 
@@ -418,13 +425,17 @@ public final class Qrylz implements Callable<Integer> {
             return new String[]{
                     "qrylz " + VERSION,
                     "signature verification test harness",
-                    "Alienkrishn [Anon4You]",
-                    "https://github.com/Anon4You/Qrylz",
+                    Identity.AUTHOR + " [" + Identity.HANDLE + "]",
+                    "https://" + Identity.REPO,
             };
         }
     }
 
     public static void main(String[] args) {
+        if (!Identity.valid()) {
+            System.err.println("qrylz: this build has been modified, refusing to run");
+            System.exit(1);
+        }
         // The banner is printed before the command line is parsed, so that it shows up
         // for every invocation, including --help and --version.
         printBanner();

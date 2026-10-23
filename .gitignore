@@ -11,6 +11,14 @@ local.properties
 *.jks
 *.keystore
 keystore.properties
+testkeys/
+
+# Test apks and generated signing output
+*.apk
+*.apks
+*.xapk
+*.apkm
+*.idsig
 
 # IDE
 .idea/

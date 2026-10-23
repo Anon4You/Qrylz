@@ -16,4 +16,7 @@ target_compile_options(qrylz_hook PRIVATE
         -fno-rtti
         -Wall)
 
+# 16 KB is a multiple of the 4 KB page size, so the same library loads on both.
+target_link_options(qrylz_hook PRIVATE -Wl,-z,max-page-size=16384)
+
 target_link_libraries(qrylz_hook log dl)

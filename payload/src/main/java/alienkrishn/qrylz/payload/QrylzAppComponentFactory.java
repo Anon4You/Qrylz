@@ -32,9 +32,12 @@ public class QrylzAppComponentFactory extends AppComponentFactory {
             if (apkPath == null) {
                 apkPath = info.sourceDir;
             }
-            QrylzPayload.install(info.packageName, apkPath);
+            QrylzPayload.install(info.packageName, apkPath, info.dataDir);
         }
-        return cl;
+        AppComponentFactory delegate = delegate();
+        return delegate != null
+                ? delegate.instantiateClassLoader(cl, info)
+                : super.instantiateClassLoader(cl, info);
     }
 
     @Override

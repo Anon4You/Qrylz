@@ -54,6 +54,11 @@ The original apk is kept **byte for byte** as the prefix of the patched apk:
 Because those bytes are already in the file, the patched apk only grows by the entries
 that were added and by one more central directory.
 
+A signer can repack the zip and move every entry, which breaks the prefix. The patched apk
+therefore also carries a small template with the original local headers and tail. The
+payload then rebuilds the original from that template and the compressed data the signer
+kept, and checks the result against the original size and SHA-256.
+
 ---
 
 ## Usage
@@ -75,21 +80,6 @@ Usage: qrylz [-hV] -i=<apk> -o=<apk> [--payload=<dex>] [--lib=<so>]
   -h, --help           Show this help message and exit.
   -V, --version        Print version information and exit.
 ```
-
-### Signing
-
-The tool does not sign, so that it does not have to carry a signing library. Sign the
-result with your own key:
-
-```bash
-apksigner sign --ks my.jks --out signed.apk patched.apk
-```
-
-Do **not** run `zipalign` over the result. It cannot relocate the apk signature block,
-and that block is what the payload serves to the application. The entries Qrylz adds are
-aligned on their own.
-
----
 
 ## Build
 
@@ -143,10 +133,16 @@ filled, because an application may read either.
 ### The native level
 
 Code that reads the certificate out of the apk file opens the apk through the libc. A
-small native library replaces the `open`, `open64`, `openat` and `openat64` calls of
-every loaded module and serves a copy of the original apk instead. The path of the apk
-is found in the memory maps of the process, which is where the native code looks for it
-as well.
+small native library replaces the `open`, `open64`, `openat`, `openat64`, `__open_2`,
+`__openat_2` and `fopen` calls of every loaded module and serves a copy of the original
+apk instead. A module that is loaded later is patched when `dlopen` or
+`android_dlopen_ext` returns, before its `JNI_OnLoad` runs. The library's ELF constructors
+have already run at that point, so a check made from a constructor is not covered. The
+path of the apk is found in the memory maps of the process, which is where the native code
+looks for it as well.
+
+The apk entries the tool adds are aligned for both 4 KB and 16 KB page devices, and the
+native hook is linked with a 16 KB maximum page size.
 
 ### The start
 
@@ -155,6 +151,10 @@ factory for the application instance before the application class is loaded, so 
 payload is in place before any native library of the application can cache the real
 package manager. The factory that was in the manifest before is kept and still does the
 actual instantiation, so an application that relies on its own factory keeps working.
+
+The factory was added in Android 9, so the patched application needs API 28 or newer.
+An application below that level does not instantiate the factory and the payload never
+runs.
 
 ---
 

@@ -17,7 +17,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.lang.reflect.Field;
-import java.util.zip.ZipEntry;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.zip.ZipFile;
 
 /**
@@ -69,8 +70,9 @@ public final class QrylzPayload {
      *
      * @param packageName package name of the host application
      * @param apkPath     path of the apk of the host application
+     * @param dataDir     data directory of the host application for the current user
      */
-    public static synchronized void install(String packageName, String apkPath) {
+    public static synchronized void install(String packageName, String apkPath, String dataDir) {
         if (installed) {
             return;
         }
@@ -81,7 +83,7 @@ public final class QrylzPayload {
             Log.w(TAG, "Cannot patch the package info", t);
         }
         try {
-            killOpen(packageName, apkPath);
+            killOpen(packageName, apkPath, dataDir);
         } catch (Throwable t) {
             Log.w(TAG, "Cannot hook the apk path", t);
         }
@@ -98,11 +100,12 @@ public final class QrylzPayload {
         }
         String packageName = context.getPackageName();
         String apkPath = getApkPath(packageName);
-        if (apkPath == null) {
-            apkPath = context.getApplicationInfo() == null
-                    ? null : context.getApplicationInfo().sourceDir;
+        String dataDir = null;
+        if (context.getApplicationInfo() != null) {
+            apkPath = apkPath == null ? context.getApplicationInfo().sourceDir : apkPath;
+            dataDir = context.getApplicationInfo().dataDir;
         }
-        install(packageName, apkPath);
+        install(packageName, apkPath, dataDir);
     }
 
     // ------------------------------------------------------------------ java level
@@ -198,12 +201,13 @@ public final class QrylzPayload {
      * Extracts the original apk and lets the native library serve it instead of the
      * patched one.
      */
-    private static void killOpen(String packageName, String apkPath) throws IOException {
+    private static void killOpen(String packageName, String apkPath, String dataDir)
+            throws IOException {
         if (apkPath == null) {
             Log.w(TAG, "No apk path");
             return;
         }
-        File origin = extractOrigin(apkPath);
+        File origin = extractOrigin(apkPath, dataDir);
         if (origin == null) {
             Log.w(TAG, "No original apk found");
             return;
@@ -215,37 +219,97 @@ public final class QrylzPayload {
     }
 
     /**
-     * Writes the original apk - the first bytes of the patched one - into the files
-     * directory of the application.
+     * Writes the original apk - the first bytes of the patched one - into the data
+     * directory of the application, which is not always /data/data on a device with
+     * more than one user.
      */
-    private static File extractOrigin(String apkPath) throws IOException {
+    private static File extractOrigin(String apkPath, String dataDir) throws IOException {
         long originSize = originSize();
-        File target = new File(dataDir(), ORIGIN_ASSET);
-        if (target.isFile() && target.length() == originSize) {
+        if (originSize <= 0 || dataDir == null || dataDir.isEmpty()) {
+            return null;
+        }
+        File installed = new File(apkPath);
+        File target = new File(dataDir, ORIGIN_ASSET);
+        if (target.isFile() && target.length() == originSize
+                && target.lastModified() == installed.lastModified() && isApk(target)) {
             return target;
         }
-        File temporary = new File(dataDir(), ORIGIN_ASSET + ".part");
-        try (InputStream in = new java.io.FileInputStream(apkPath);
-             OutputStream out = new FileOutputStream(temporary)) {
-            byte[] buffer = new byte[65536];
-            long total = 0;
-            while (total < originSize) {
-                int read = in.read(buffer, 0, (int) Math.min(buffer.length, originSize - total));
-                if (read <= 0) {
-                    break;
+        target.delete();
+        // A signer that repacks the zip moved every entry, so the prefix is not the
+        // original apk anymore. Rebuild it from the template and the compressed data
+        // of the installed apk.
+        try {
+            File rebuilt = OriginRestorer.restore(installed, dataDir);
+            if (rebuilt != null) {
+                boolean moved = false;
+                try {
+                    if (!isApk(rebuilt)) {
+                        Log.w(TAG, "the rebuilt original apk is not valid, trying the prefix");
+                    } else {
+                        Files.move(rebuilt.toPath(), target.toPath(),
+                                StandardCopyOption.REPLACE_EXISTING);
+                        moved = true;
+                        target.setLastModified(installed.lastModified());
+                        Log.i(TAG, "original apk rebuilt (" + target.length() + " bytes)");
+                        return target;
+                    }
+                } finally {
+                    if (!moved) {
+                        rebuilt.delete();
+                    }
                 }
-                out.write(buffer, 0, read);
-                total += read;
             }
-            if (total != originSize) {
-                throw new IOException("The original apk is shorter than expected");
+        } catch (Throwable t) {
+            Log.w(TAG, "Cannot rebuild the original apk", t);
+        }
+        // The application may run in more than one process, a fixed temporary name
+        // would let two of them write the same file.
+        File temporary = File.createTempFile(ORIGIN_ASSET, ".part", new File(dataDir));
+        boolean moved = false;
+        try {
+            try (InputStream in = new java.io.FileInputStream(installed);
+                 OutputStream out = new FileOutputStream(temporary)) {
+                byte[] buffer = new byte[65536];
+                long total = 0;
+                while (total < originSize) {
+                    int read = in.read(buffer, 0,
+                            (int) Math.min(buffer.length, originSize - total));
+                    if (read <= 0) {
+                        break;
+                    }
+                    out.write(buffer, 0, read);
+                    total += read;
+                }
+                if (total != originSize) {
+                    throw new IOException("The original apk is shorter than expected");
+                }
+            }
+            if (!isApk(temporary)) {
+                // A signer that repacks the zip rewrites the start of the file, so the
+                // prefix is not the original apk anymore. Serving it would break the
+                // resources of the application; skip the native level instead.
+                Log.w(TAG, "the original apk prefix is not a valid apk, native hook disabled");
+                return null;
+            }
+            Files.move(temporary.toPath(), target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING);
+            moved = true;
+            target.setLastModified(installed.lastModified());
+            Log.i(TAG, "original apk extracted (" + target.length() + " bytes)");
+            return target;
+        } finally {
+            if (!moved) {
+                temporary.delete();
             }
         }
-        if (!temporary.renameTo(target)) {
-            return temporary;
+    }
+
+    private static boolean isApk(File file) {
+        try (ZipFile zip = new ZipFile(file)) {
+            return zip.getEntry("AndroidManifest.xml") != null;
+        } catch (IOException e) {
+            return false;
         }
-        Log.i(TAG, "original apk extracted (" + target.length() + " bytes)");
-        return target;
     }
 
     /**
@@ -309,26 +373,6 @@ public final class QrylzPayload {
     }
 
     // ------------------------------------------------------------------ helpers
-
-    private static File dataDir() {
-        return new File("/data/data/" + hostPackageName());
-    }
-
-    private static String hostPackageName() {
-        try {
-            Class<?> threadClass = Class.forName("android.app.ActivityThread");
-            Object thread = threadClass.getMethod("currentActivityThread").invoke(null);
-            Field field = findField(threadClass, "mBoundApplication");
-            Object bound = field.get(thread);
-            if (bound == null) {
-                return "";
-            }
-            Object info = findField(bound.getClass(), "appInfo").get(bound);
-            return info == null ? "" : (String) findField(info.getClass(), "packageName").get(info);
-        } catch (Throwable t) {
-            return "";
-        }
-    }
 
     private static void clearPackageInfoCache() {
         try {
